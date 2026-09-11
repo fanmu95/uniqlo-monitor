@@ -24,7 +24,12 @@ COPY static/ ./static/
 RUN mkdir -p /app/data \
     && useradd -m -u 1000 appuser \
     && chown -R appuser:appuser /app
-USER appuser
+
+# 启动入口：以 root 修正 bind mount 卷权限（NAS 宿主机目录常为 root 所有，
+# 导致非 root 用户无法写 SQLite -> "unable to open database file"），再降权运行
+COPY entrypoint.sh /entrypoint.sh
+RUN chmod +x /entrypoint.sh
+USER root
 
 EXPOSE 8811
 VOLUME ["/app/data"]
@@ -32,4 +37,5 @@ VOLUME ["/app/data"]
 HEALTHCHECK --interval=60s --timeout=5s --start-period=15s --retries=3 \
     CMD python -c "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:8811/api/products', timeout=4).status==200 else 1)"
 
+ENTRYPOINT ["/entrypoint.sh"]
 CMD ["python", "app.py"]

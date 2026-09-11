@@ -6,10 +6,16 @@ services:
     container_name: uniqlo-monitor
     restart: unless-stopped
     ports:
-      - "9903:8811"          # 左侧为 NAS 对外端口，可自行修改
+      - "9903:8811"            # 左侧为对外访问端口：http://NAS-IP:9903
     environment:
-      TZ: Asia/Shanghai       # 必须：免打扰时段依赖本地时间
-      UQ_HOST: 0.0.0.0
+      TZ: Asia/Shanghai        # 必须：免打扰时段（23:00-08:00）依赖本地时间，UTC 会偏 8 小时
+      UQ_HOST: 0.0.0.0         # 容器内监听全部网卡，否则外部无法访问
       UQ_PORT: "8811"
     volumes:
-      - ./data:/app/data      # 数据持久化（SQLite、价格历史、订阅与通知配置）
+      - ./data:/app/data       # 数据持久化：SQLite、价格历史、订阅与通知配置都在这
+                               # NAS 实际路径为 /volume1/Docker/uniqlo-monitor/data
+    logging:                   # 日志轮转，防止长期运行撑爆磁盘
+      driver: json-file
+      options:
+        max-size: "5m"
+        max-file: "3"
