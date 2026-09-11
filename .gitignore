@@ -1,0 +1,25 @@
+# 运行数据（含 SQLite 数据库，其中保存通知 token 等敏感配置，务必不要提交）
+data/
+*.db
+*.db-journal
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+
+# 日志与临时产物
+*.log
+*.tmp
+ci_*.log
+
+# 截图 / 临时下载图片（交付不产出截图，仅内部验证时可能生成）
+*.png
+*.jpg
+*.jpeg
+
+# 系统
+.DS_Store
+Thumbs.db

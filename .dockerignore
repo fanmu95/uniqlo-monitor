@@ -1,0 +1,15 @@
+# 构建上下文排除：绝不把本地数据（含通知 token）打进镜像
+data/
+*.db
+*.db-journal
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+.git/
+.gitignore
+*.log
+*.md
+*.png
+*.jpg
+*.jpeg

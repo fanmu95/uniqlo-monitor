@@ -1,0 +1,15 @@
+services:
+  uniqlo-monitor:
+    image: ghcr.io/fanmu95/uniqlo-monitor:latest
+    # 想本地构建就取消下一行注释（并把 image 行注释掉）
+    # build: .
+    container_name: uniqlo-monitor
+    restart: unless-stopped
+    ports:
+      - "9903:8811"          # 左侧为 NAS 对外端口，可自行修改
+    environment:
+      TZ: Asia/Shanghai       # 必须：免打扰时段依赖本地时间
+      UQ_HOST: 0.0.0.0
+      UQ_PORT: "8811"
+    volumes:
+      - ./data:/app/data      # 数据持久化（SQLite、价格历史、订阅与通知配置）
