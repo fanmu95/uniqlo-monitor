@@ -13,7 +13,7 @@ from typing import List, Optional
 import uvicorn
 import httpx
 from fastapi import FastAPI, HTTPException
-from fastapi.responses import FileResponse, JSONResponse, Response
+from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, Response
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
@@ -565,12 +565,42 @@ def api_set_settings(s: SettingsIn):
 
 
 # ---------------- 前端 ----------------
+# 静态资源走 ETag 校验而非本地缓存；index.html 里的 __V__ 会替换成 static/ 的最新
+# 修改时间，前端文件一改 URL 就变，普通刷新即可拿到新版本（无需 Ctrl+F5）。
+@app.middleware("http")
+async def _static_revalidate(request, call_next):
+    resp = await call_next(request)
+    if request.url.path.startswith("/static/") or request.url.path == "/":
+        resp.headers["Cache-Control"] = "no-store" if request.url.path == "/" else "no-cache"
+    return resp
+
+
 app.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")
+
+_static_v_cache = {"ts": 0.0, "v": "0"}
+
+
+def _static_version() -> str:
+    now = time.time()
+    if now - _static_v_cache["ts"] < 3:
+        return _static_v_cache["v"]
+    newest = 0.0
+    for root, _dirs, files in os.walk(STATIC_DIR):
+        for fn in files:
+            try:
+                newest = max(newest, os.path.getmtime(os.path.join(root, fn)))
+            except OSError:
+                pass
+    _static_v_cache.update(ts=now, v=str(int(newest)))
+    return _static_v_cache["v"]
 
 
 @app.get("/")
 def index():
-    return FileResponse(os.path.join(STATIC_DIR, "index.html"))
+    path = os.path.join(STATIC_DIR, "index.html")
+    with open(path, encoding="utf-8") as f:
+        html = f.read().replace("__V__", _static_version())
+    return HTMLResponse(html)
 
 
 # ---------------- 后台调度 ----------------
