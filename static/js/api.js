@@ -80,39 +80,89 @@ function kindText(k){
           PRICE_DOWN:'降价',PRICE_UP:'涨价',TARGET_HIT:'达标',GONE:'下架'}[k]||k;
 }
 
-/* 价格走势 SVG（仅价格变化点） */
+/* 价格走势 SVG
+   opts.promos: [{begin_ts,end_ts}]（毫秒，来自官网 timeLimited*）→ 画限时特优时段底色
+   opts.days:   只画最近 N 天（0=全部）
+   X 轴按真实时间比例（不是等距序号），所以特优时段能与价格点对齐 */
 function priceChartHtml(d, opts){
   opts = opts || {};
-  const pts = (d && d.points) || [];
-  const box = '<div style="font-size:12px;color:var(--muted);margin:2px 0 8px">价格走势（仅记录变化点）</div>';
-  if(!pts.length) return box+'<div style="font-size:12px;color:var(--muted)">暂无价格记录，扫描入库后出现</div>';
-  const W=720,H=88,P=16;
+  const all = (d && d.points) || [];
+  const days = opts.days || 0;
+  const box = '<div style="font-size:12px;color:var(--muted);margin:2px 0 8px">价格走势' +
+    '<span style="margin-left:6px">· 仅记录变化点' +
+    (days ? (' · 最近 ' + days + ' 天') : '') + '</span></div>';
+  if(!all.length) return box+'<div style="font-size:12px;color:var(--muted)">暂无价格记录，扫描入库后出现</div>';
+  const tEnd = all[all.length-1].ts;
+  const pts = days ? all.filter(p => p.ts >= tEnd - days*86400) : all;
+  if(!pts.length) return box+'<div style="font-size:12px;color:var(--muted)">该时间段内没有价格记录</div>';
+
+  const W=720, H=96, P=18, TOP=14;
   const prices = pts.map(p=>p.price);
   const min = Math.min.apply(null,prices), max = Math.max.apply(null,prices);
   const span = (max-min)||1;
-  const X = i => pts.length===1 ? W/2 : P+(W-2*P)*i/(pts.length-1);
-  const Y = p => P+(H-2*P)*(1-(p-min)/span);
+  const t0 = pts[0].ts, t1 = pts[pts.length-1].ts;
+  const X = t => (t1===t0) ? W/2 : P+(W-2*P)*(t-t0)/(t1-t0);
+  const Y = p => TOP+(H-2*TOP)*(1-(p-min)/span);
+  const f = n => n.toFixed(1);
+
+  // 限时特优时段（毫秒 → 秒）
+  let bands = '';
+  (opts.promos||[]).forEach((w,i) => {
+    const b = Math.round((w.begin_ts||0)/1000), e = Math.round((w.end_ts||0)/1000) || t1;
+    if(!b || e < t0 || b > t1) return;
+    const x1 = X(Math.max(b, t0)), x2 = X(Math.min(e, t1));
+    bands += '<rect x="'+f(x1)+'" y="'+TOP+'" width="'+f(Math.max(1,x2-x1))+'" height="'+(H-2*TOP)+
+      '" fill="#d0021b" opacity="0.07"/>';
+    if(i===0 && (x2-x1) > 60){
+      bands += '<text x="'+f((x1+x2)/2)+'" y="'+(TOP+10)+'" text-anchor="middle" font-size="9" '+
+        'fill="#d0021b" opacity="0.8">限时特优</text>';
+    }
+  });
+
   let path='', dots='';
   pts.forEach((p,i)=>{
-    const x=X(i), y=Y(p.price);
-    path += (i?' L':'M')+x.toFixed(1)+' '+y.toFixed(1);
-    dots += '<circle cx="'+x.toFixed(1)+'" cy="'+y.toFixed(1)+'" r="2.5" fill="#888780"/>';
+    const x=X(p.ts), y=Y(p.price);
+    path += (i?' L':'M')+f(x)+' '+f(y);
+    dots += '<circle cx="'+f(x)+'" cy="'+f(y)+'" r="2.5" fill="#888780"/>';
   });
+
+  // 月度低点
+  const months = {};
+  pts.forEach(p => { const d2 = new Date(p.ts*1000);
+    const k = d2.getFullYear() + '-' + (d2.getMonth()+1);
+    if(!months[k] || p.price < months[k].price) months[k] = p; });
+  let monthMarks = '';
+  Object.keys(months).slice(-6).forEach(k => {
+    const p = months[k];
+    const x = X(p.ts);
+    monthMarks += '<circle cx="'+f(x)+'" cy="'+f(Y(p.price))+'" r="3.4" fill="#fff" '+
+      'stroke="#1a7f37" stroke-width="1.2"/>';
+    if(x > P + 34){    // 太靠左会给「区间最低」标签让位
+      monthMarks += '<text x="'+f(x)+'" y="'+f(Y(p.price)-7)+'" text-anchor="middle" font-size="9" '+
+        'fill="#1a7f37">'+(Number(k.split('-')[1]))+'月 ¥'+p.price+'</text>';
+    }
+  });
+
   const last = pts[pts.length-1];
   const lowPt = pts.reduce((a,b)=>b.price<a.price?b:a, pts[0]);
   const svg = '<svg viewBox="0 0 '+W+' '+H+'" style="width:100%;height:auto;display:block">'+
+    bands+
     '<line x1="'+P+'" y1="'+H+'" x2="'+P+'" y2="6" stroke="#e8e8e8" stroke-width="0.5"/>'+
     '<line x1="'+P+'" y1="'+H+'" x2="'+(W-P)+'" y2="'+H+'" stroke="#e8e8e8" stroke-width="0.5"/>'+
     '<path d="'+path+'" fill="none" stroke="#888780" stroke-width="1.2"/>'+
-    dots+
-    '<circle cx="'+X(pts.indexOf(lowPt)).toFixed(1)+'" cy="'+Y(lowPt.price).toFixed(1)+'" r="3.5" fill="#1a7f37"/>'+
-    '<circle cx="'+X(pts.length-1).toFixed(1)+'" cy="'+Y(last.price).toFixed(1)+'" r="3.5" fill="#d0021b"/>'+
-    '<text x="'+P+'" y="'+H+'" text-anchor="start" dy="-3" font-size="11" fill="#888780">'+fmtTime(pts[0].ts)+'</text>'+
-    '<text x="'+(W-P)+'" y="'+H+'" text-anchor="end" dy="-3" font-size="11" fill="#888780">'+fmtTime(last.ts)+'</text>'+
-    '<text x="'+P+'" y="12" font-size="11" fill="#1a7f37">史低 ¥'+lowPt.price+'</text>'+
-    '<text x="'+(W-P)+'" y="12" text-anchor="end" font-size="11" fill="#444441">当前 ¥'+last.price+'</text>'+
-    (min<max?'<text x="'+(W-P)+'" y="'+(Y(max)+8).toFixed(1)+'" text-anchor="end" font-size="11" fill="#888780">¥'+max+'</text>':'')+
-  '</svg>';
+    dots+monthMarks+
+    '<circle cx="'+f(X(lowPt.ts))+'" cy="'+f(Y(lowPt.price))+'" r="3.5" fill="#1a7f37"/>'+
+    '<circle cx="'+f(X(last.ts))+'" cy="'+f(Y(last.price))+'" r="3.5" fill="#d0021b"/>'+
+    '<text x="'+P+'" y="'+H+'" text-anchor="start" dy="-3" font-size="11" fill="#888780">'+
+      fmtTime(pts[0].ts)+'</text>'+
+    '<text x="'+(W-P)+'" y="'+H+'" text-anchor="end" dy="-3" font-size="11" fill="#888780">'+
+      fmtTime(last.ts)+'</text>'+
+    '<text x="'+P+'" y="11" font-size="11" fill="#1a7f37">区间最低 ¥'+lowPt.price+'</text>'+
+    '<text x="'+(W-P)+'" y="11" text-anchor="end" font-size="11" fill="#444441">当前 ¥'+last.price+'</text>'+
+  '</svg>'+
+  '<div class="hint" style="margin-top:4px">'+
+    '绿圈 = 月度低点；<span style="color:#d0021b">红色区域</span> = 限时特优时段（从开始记录起积累）'+
+  '</div>';
   return box+svg;
 }
 

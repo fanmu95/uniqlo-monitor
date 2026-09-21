@@ -78,7 +78,11 @@ class SettingsIn(BaseModel):
     price_interval_min: Optional[int] = None
     catalog_sweep_min: Optional[int] = None
     catalog_keep_days: Optional[int] = None
+    event_keep_days: Optional[int] = None
+    log_keep_days: Optional[int] = None
     catalog_hide_days: Optional[int] = None
+    price_drop_min_pct: Optional[float] = None
+    notify_kinds: Optional[List[str]] = None
     low_threshold: Optional[int] = None
     notify_enabled: Optional[int] = None
     notify_channel: Optional[str] = None
@@ -349,20 +353,23 @@ def _hide_days(all_days: bool = False):
 def api_catalog(q: str = "", category: str = "", sort: str = "overall",
                 page: int = 1, page_size: int = 40, all_days: int = 0,
                 only_new: int = 0, only_discount: int = 0, only_stock: int = 0,
-                only_doptimal: int = 0):
+                only_doptimal: int = 0, min_discount: int = 0):
     """商城商品列表（本地商品库）。sort: overall/newest/new/priceAsc/priceDesc/discount
 
     默认隐藏已下架商品（gone_ts 有值 / 超过 catalog_hide_days 天未在官网出现）。
-    筛选条件（可叠加，本地计算）：only_new 官方新品榜 / only_discount 有折扣 / only_stock 官网标记在售。
+    筛选条件（可叠加，本地计算）：only_new 官方新品榜 / only_discount 有折扣 /
+    only_stock 官网标记在售（预留，实测恒 Y）/ only_doptimal 限时特优 / min_discount 折扣 ≥ N%。
     """
     r = db.list_catalog(category=category or None, q=q.strip() or None, sort=sort,
                         page=page, page_size=page_size, hide_days=_hide_days(bool(all_days)),
                         only_new=bool(only_new), only_discount=bool(only_discount),
-                        only_stock=bool(only_stock), only_doptimal=bool(only_doptimal))
+                        only_stock=bool(only_stock), only_doptimal=bool(only_doptimal),
+                        min_discount=int(min_discount or 0))
     r["category"] = category or "ALL"
     r["sort"] = sort
     r["filters"] = {"new": bool(only_new), "discount": bool(only_discount),
-                    "stock": bool(only_stock), "doptimal": bool(only_doptimal)}
+                    "stock": bool(only_stock), "doptimal": bool(only_doptimal),
+                    "min_discount": int(min_discount or 0)}
     return r
 
 
@@ -393,6 +400,7 @@ def api_catalog_item(code: str):
                  for s in skus],
         "subscribed": subscribed,
         "price_series": db.price_series(code),
+        "promo_windows": db.list_promo_windows(code),
         "has_stock_detail": bool(skus),
     }
 
@@ -637,6 +645,8 @@ def _scheduler():
             if time.time() - last_prune > 86400:
                 last_prune = time.time()
                 db.prune_snapshots(int(cfg.get("catalog_keep_days") or 90))
+                db.prune_events(int(cfg.get("event_keep_days") or 90))
+                db.prune_logs(int(cfg.get("log_keep_days") or 30))
         except Exception as e:                        # noqa: BLE001
             db.add_log(0, "快照清理异常: %s" % e)
 

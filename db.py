@@ -110,6 +110,14 @@ CREATE TABLE IF NOT EXISTS catalog_sweeps (
   ok            INTEGER,
   message       TEXT
 );
+CREATE TABLE IF NOT EXISTS promo_windows (
+  code       TEXT NOT NULL,
+  begin_ts   INTEGER NOT NULL,
+  end_ts     INTEGER,
+  first_seen INTEGER,
+  PRIMARY KEY(code, begin_ts)
+);
+CREATE INDEX IF NOT EXISTS idx_promo_code ON promo_windows(code);
 """
 
 DEFAULT_SETTINGS = {
@@ -118,10 +126,16 @@ DEFAULT_SETTINGS = {
     "sku_refresh_hour": 4,        # SKU 字典每日刷新时刻
     "catalog_sweep_min": 360,     # 商品库全站扫描间隔（分钟）
     "catalog_keep_days": 90,      # 快照/价格历史保留天数
+    "event_keep_days": 90,        # 事件保留天数
+    "log_keep_days": 30,          # 采集日志保留天数
     "catalog_hide_days": 3,       # 超过 N 天未在扫描中出现的商品视为已下架（列表隐藏）
     "low_threshold": 2,           # 低库存阈值（件）
+    "price_drop_min_pct": 0,      # 降价推送阈值（%），0=任何降价都推
     "notify_enabled": 0,
-    "notify_channel": "ntfy",     # ntfy / wecom
+    "notify_channel": "ntfy",     # ntfy / wecom / pushplus
+    # 通知分类开关（默认全开）：PRICE_DOWN/TARGET_HIT 价格类，IN/OUT/LOW 库存类，
+    # TRANSIT 在途，GONE 下架
+    "notify_kinds": ["PRICE_DOWN", "TARGET_HIT", "GONE", "IN", "OUT", "LOW", "TRANSIT"],
     "ntfy_topic": "",
     "ntfy_server": "https://ntfy.sh",
     "wecom_webhook": "",
@@ -406,6 +420,25 @@ class DB:
                 (code, ts, price))
             self.conn.commit()
 
+    # ---------- 限时特优时段（走势图标注用） ----------
+    def record_promo(self, code: str, begin_ts, end_ts, ts: int):
+        """记录一个限时特优时段（同一 start 只写一次；结束时间可能后补）。"""
+        if not code or not begin_ts:
+            return
+        with self._mutex:
+            self.conn.execute(
+                """INSERT INTO promo_windows(code,begin_ts,end_ts,first_seen) VALUES(?,?,?,?)
+                   ON CONFLICT(code,begin_ts) DO UPDATE SET
+                     end_ts=COALESCE(excluded.end_ts, promo_windows.end_ts)""",
+                (code, int(begin_ts), int(end_ts) if end_ts else None, ts))
+            self.conn.commit()
+
+    def list_promo_windows(self, code: str) -> List[dict]:
+        with self._mutex:
+            return [dict(r) for r in self.conn.execute(
+                "SELECT begin_ts,end_ts FROM promo_windows WHERE code=? ORDER BY begin_ts",
+                (code,))]
+
     def price_series(self, code: str, limit: int = 400) -> List[dict]:
         with self._mutex:
             rows = [dict(r) for r in self.conn.execute(
@@ -663,7 +696,8 @@ class DB:
                      sort: str = "overall", page: int = 1, page_size: int = 40,
                      hide_days: Optional[int] = None, with_current: bool = True,
                      only_new: bool = False, only_discount: bool = False,
-                     only_stock: bool = False, only_doptimal: bool = False) -> dict:
+                     only_stock: bool = False, only_doptimal: bool = False,
+                     min_discount: int = 0) -> dict:
         """商城商品列表（本地库）。sort: overall/newest/priceAsc/priceDesc/discount/new。
 
         可选筛选（互相可叠加，都是本地条件，不产生上游请求）：
@@ -671,6 +705,7 @@ class DB:
           only_discount 现价 < 原价（有折扣）
           only_stock    官网在售标记为 Y（注：官方列表只收可购商品，实测恒为 Y，预留）
           only_doptimal 官方「限时特优」标识
+          min_discount  折扣力度 ≥ N%（0=不限）
         """
         where, params = [], []
         if with_current and hide_days:
@@ -690,6 +725,10 @@ class DB:
             where.append("stock_flag = 'Y'")
         if only_doptimal:
             where.append("identity LIKE '%time_doptimal%'")
+        if min_discount and int(min_discount) > 0:
+            where.append("origin_price > 0 AND cur_price IS NOT NULL "
+                         "AND (origin_price-cur_price)*100/origin_price >= ?")
+            params.append(int(min_discount))
         order = {
             "overall": "rank_overall IS NULL, rank_overall ASC, code DESC",
             "newest": "upstream_new_ts IS NULL, upstream_new_ts DESC, code DESC",
@@ -814,6 +853,43 @@ class DB:
         with self._mutex:
             return [dict(r) for r in self.conn.execute(
                 "SELECT * FROM categories ORDER BY level, sort, code")]
+
+    def prune_categories(self, touched_before: int, keep: List[str]) -> int:
+        """删除「本轮同步未出现、且没有任何商品挂靠」的分类节点（官方已下线）。
+
+        只应在分类同步**完整跑完**（未耗尽请求预算）时调用；keep 里的种子码永不删除。
+        """
+        keep = list(keep or [])
+        marks = ",".join("?" * len(keep)) if keep else "''"
+        with self._mutex:
+            cur = self.conn.execute(
+                """DELETE FROM categories
+                   WHERE updated_at < ?
+                     AND code NOT IN (""" + marks + """)
+                     AND NOT EXISTS (SELECT 1 FROM catalog_categories cc
+                                     WHERE cc.category_code = categories.code)""",
+                [touched_before] + keep)
+            n = cur.rowcount or 0
+            self.conn.commit()
+        return n
+
+    def prune_events(self, keep_days: int = 90) -> int:
+        """事件保留策略（默认 90 天）。"""
+        cutoff = int(time.time()) - max(1, int(keep_days)) * 86400
+        with self._mutex:
+            cur = self.conn.execute("DELETE FROM events WHERE ts < ?", (cutoff,))
+            n = cur.rowcount or 0
+            self.conn.commit()
+        return n
+
+    def prune_logs(self, keep_days: int = 30) -> int:
+        """采集日志保留策略（默认 30 天）。"""
+        cutoff = int(time.time()) - max(1, int(keep_days)) * 86400
+        with self._mutex:
+            cur = self.conn.execute("DELETE FROM collect_logs WHERE ts < ?", (cutoff,))
+            n = cur.rowcount or 0
+            self.conn.commit()
+        return n
 
     def category_counts(self) -> Dict[str, int]:
         with self._mutex:

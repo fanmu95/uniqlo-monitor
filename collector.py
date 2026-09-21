@@ -66,8 +66,10 @@ class Collector:
                                "detail": "仅剩 %s 件" % cur,
                                "old_val": str(old), "new_val": str(cur), "ts": ts})
 
-            # 在途预告：当前无货但有在途
-            if cur == 0 and (s.get("transit") or 0) > 0:
+            # 在途预告：当前无货但有在途。（只在「无在途 → 有在途」时产生一次，
+            # 否则断货期间每轮采集都会重复写事件、订阅了该色码还会反复推送）
+            transit_old = (old_row.get("transit") if old_row else None) or 0
+            if cur == 0 and (s.get("transit") or 0) > 0 and transit_old == 0:
                 events.append({"product_code": pc, "sku_id": sku_id, "kind": "TRANSIT",
                                "title": "即将补货：%s" % label,
                                "detail": "在途 %s 件" % s["transit"],
@@ -75,13 +77,14 @@ class Collector:
         return events
 
     # ---------- 价格 / 预期价 / 史低 ----------
-    def _price_events(self, product: dict, new_price, ts: int):
+    def _price_events(self, product: dict, new_price, ts: int, drop_min_pct: float = 0):
         """返回 (events, state)。state 含最新 hist_low_price / target_hit / cur_price。
 
         规则（与流程图一致）：
-        - 未设预期价：较上次监控降价 → PRICE_DOWN 推送；涨价 → 仅记录
+        - 未设预期价：较上次监控降价 → PRICE_DOWN 推送（降幅低于 drop_min_pct 时仅记录）；
+          涨价 → 仅记录
         - 设预期价：降价未达预期 → PRICE_DOWN 仅记录（静默）；
-          跌破预期且未推过 → TARGET_HIT 推送；达标后回升超过预期 → 复位可再次触发
+          跌破预期且未推过 → TARGET_HIT 推送（不受降幅阈值影响）；达标后回升超过预期 → 复位
         - 史低：首次采集初始化；现价破史低 → 更新并标记「历史新低」附加到文案
         """
         events = []
@@ -114,12 +117,16 @@ class Collector:
 
         if new_price < old_price:                                    # 降价
             if target is None:
+                drop_pct = (old_price - new_price) / old_price * 100 if old_price else 0
+                quiet = bool(drop_min_pct) and drop_pct < float(drop_min_pct)
                 events.append({
                     "product_code": product["product_code"], "sku_id": "",
-                    "kind": "PRICE_DOWN", "notify": True,
-                    "title": "降价：%s" % name,
-                    "detail": "¥%s → ¥%s（较上次监控降 ¥%s%s）%s"
-                              % (old_price, new_price, d_last, off_txt, low_tag),
+                    "kind": "PRICE_DOWN", "notify": not quiet,
+                    "title": ("降价（未达阈值）：%s" % name) if quiet else ("降价：%s" % name),
+                    "detail": "¥%s → ¥%s（较上次监控降 ¥%s，%.1f%%%s）%s%s"
+                              % (old_price, new_price, d_last, drop_pct,
+                                 ("，低于推送阈值 %s%%" % drop_min_pct) if quiet else "",
+                                 off_txt, low_tag),
                     "old_val": str(old_price), "new_val": str(new_price), "ts": ts})
             elif new_price <= target:
                 if not hit:
@@ -168,7 +175,11 @@ class Collector:
             return "%s(%s)" % (c, sku["sub_code"])
         return c
 
-    def _should_notify(self, ev: dict, watches: List[dict]) -> bool:
+    def _should_notify(self, ev: dict, watches: List[dict],
+                       kinds: Optional[List[str]] = None) -> bool:
+        # 通知分类开关（设置页四组：价格 / 库存 / 在途 / 下架），默认全开
+        if kinds is not None and ev.get("kind") not in kinds:
+            return False
         if "notify" in ev:                       # 价格类事件自带推送标记
             return bool(ev.get("notify"))
         mine = [w for w in watches if w["product_code"] == ev["product_code"]]
@@ -261,6 +272,8 @@ class Collector:
                             p.get("last_seen_ts") or p.get("gone_ts"))))}
         cfg = self.db.all_settings()
         threshold = int(cfg.get("low_threshold") or 2)
+        drop_min = float(cfg.get("price_drop_min_pct") or 0)
+        kinds = cfg.get("notify_kinds")
 
         try:
             snap = self.client.snapshot(p["product_code"])
@@ -284,7 +297,7 @@ class Collector:
         ])
 
         events = self._diff(p, prev, snap, ts, threshold)
-        price_events, state = self._price_events(p, snap.get("min_price"), ts)
+        price_events, state = self._price_events(p, snap.get("min_price"), ts, drop_min)
         events += price_events
         for ev in events:
             self.db.add_event(ev)
@@ -295,6 +308,10 @@ class Collector:
             if not self.db.price_series(code, 1) or p.get("cur_price") is None \
                     or new_price != p.get("cur_price"):
                 self.db.add_price_snapshot(code, ts, new_price)
+
+        # 限时特优时段（走势图标注用；列表价里的 timeLimited* 也在扫描时记录）
+        if p.get("limited_begin"):
+            self.db.record_promo(code, p["limited_begin"], p.get("limited_end"), ts)
 
         # 老商品补主图/色图（仅一次）：图片字段只在搜索接口返回
         main_pic = p.get("main_pic")
@@ -328,7 +345,7 @@ class Collector:
 
         # 通知
         watches = self.db.list_watches()
-        pending = [e for e in events if self._should_notify(e, watches)]
+        pending = [e for e in events if self._should_notify(e, watches, kinds)]
         notified_msg = ""
         if pending:
             try:
@@ -382,9 +399,20 @@ class Collector:
         其余商品的变价只落 price_snapshots，由「变价信息」页派生展示。
         """
         cfg = self.db.all_settings()
+        drop_min = float(cfg.get("price_drop_min_pct") or 0)
+        kinds = cfg.get("notify_kinds")
         ts = int(time.time())
         rank = 0
-        page = 1
+        # 断点续扫：上一轮在 page N 中断（12 小时内）则本轮从 N 续扫，两轮合起来覆盖全站
+        resume = self.db.get_setting("sweep_resume") or {}
+        start_page = 1
+        if isinstance(resume, dict) and resume.get("scope") == scope:
+            age = ts - int(resume.get("ts") or 0)
+            rp = int(resume.get("page") or 0)
+            if 1 < rp <= max_pages and 0 <= age <= 12 * 3600:
+                start_page = rp
+        covered_before = (start_page - 1) * PAGE_SIZE_MAX
+        page = start_page
         pages = 0
         total = 0
         new_items = 0
@@ -393,6 +421,7 @@ class Collector:
         seen_set = set()
         dups = 0
         first_sum = 0
+        reached_end = False
         pending: List[dict] = []
         watches = self.db.list_watches()
         err = ""
@@ -401,10 +430,11 @@ class Collector:
                 r = self.client.browse(category_code=scope, page=page,
                                        page_size=PAGE_SIZE_MAX, rank="overall")
                 items = r.get("items") or []
-                if not items:
-                    break
-                if page == 1:
+                if not first_sum:
                     first_sum = r.get("product_sum") or 0
+                if not items:
+                    reached_end = True
+                    break
                 for it in items:
                     norm = normalize_item(it)
                     code = norm.get("code")
@@ -424,6 +454,9 @@ class Collector:
                     cate_codes = [c.get("cateCode") for c in (norm.get("cate_sequence") or [])]
                     if cate_codes:
                         self.db.set_item_categories(code, cate_codes)
+                    if norm.get("limited_begin"):
+                        self.db.record_promo(code, norm["limited_begin"],
+                                             norm.get("limited_end"), ts)
                     if res.get("inserted"):
                         new_items += 1
                         if norm.get("min_price") is not None:
@@ -432,22 +465,31 @@ class Collector:
                         price_changes += 1
                         self.db.add_price_snapshot(code, ts, res["new_price"])
                         if prev and prev.get("track_level") == "full":
-                            events, state = self._price_events(prev, res["new_price"], ts)
+                            events, state = self._price_events(prev, res["new_price"], ts, drop_min)
                             for ev in events:
                                 self.db.add_event(ev)
                             if state.get("target_hit") != prev.get("target_hit"):
                                 self.db.set_target_hit(code, state["target_hit"])
-                            pending += [e for e in events if self._should_notify(e, watches)]
+                            pending += [e for e in events
+                                        if self._should_notify(e, watches, kinds)]
                 pages += 1
-                if pages * PAGE_SIZE_MAX >= (r.get("product_sum") or 0):
+                if page * PAGE_SIZE_MAX >= (r.get("product_sum") or 0):
+                    reached_end = True
                     break
                 page += 1
         except UQError as e:
             err = str(e)
 
-        # ---- 下架判定：只在「完整扫完一轮」时做（半途中断/少页会误杀）----
+        # 断点记录：中断则记下当前页（下轮续扫），扫完则清除
+        if err and pages > 0:
+            self.db.set_setting("sweep_resume", {"scope": scope, "page": page, "ts": ts})
+        elif reached_end:
+            self.db.set_setting("sweep_resume", {})
+
+        # ---- 下架判定/史低自愈：只在「覆盖全站的一轮」完成时做（半途中断/少页会误杀）----
         gone_cnt = 0
-        complete = pages > 0 and (total + dups) >= first_sum and not err
+        complete = bool(reached_end and not err and first_sum
+                        and (covered_before + total + dups) >= first_sum)
         if complete:
             gone_cnt, gone_pending = self.handle_gone(int(cfg.get("catalog_hide_days") or 3), ts)
             pending += gone_pending
@@ -469,8 +511,9 @@ class Collector:
         # ---- 史低自愈：史低必须等于价格历史的最低点 ----
         fixed_low = self.db.align_hist_low() if complete else 0
 
-        msg = "商品库扫描(%s)：%d 页 / %d 件 / 新增 %d / 变价 %d / 下架 %d%s%s%s%s" % (
+        msg = "商品库扫描(%s)：%d 页 / %d 件 / 新增 %d / 变价 %d / 下架 %d%s%s%s%s%s" % (
             scope, pages, total, new_items, price_changes, gone_cnt,
+            (" / 续扫自第 %d 页" % start_page) if start_page > 1 else "",
             (" / 史低修正 %d" % fixed_low) if fixed_low else "",
             (" / 重复条目 %d 已跳过" % dups) if dups else "", notified,
             (" | 中断: " + err) if err else "")
@@ -550,6 +593,7 @@ class Collector:
         nodes: Dict[str, dict] = {}
         used = 0
         errors = 0
+        start = int(time.time())
         for code in seeds:
             if used >= budget:
                 break
@@ -583,7 +627,15 @@ class Collector:
                 if cur is None or n["level"] < cur["level"]:
                     nodes[n["code"]] = n
             self.db.upsert_categories(list(nodes.values()))
-        msg = "分类同步：%d 个节点（%d 次请求，%d 次失败）" % (len(nodes), used, errors)
+        # 同步完整（未耗尽预算、且本轮没有请求失败）时，清理官方已下线、
+        # 且没有任何商品挂靠的分类节点。留 1 天宽限：某轮覆盖不全时下轮还能救回来。
+        pruned = 0
+        if nodes and used < budget and errors == 0:
+            pruned = self.db.prune_categories(touched_before=start - 86400,
+                                              keep=CATEGORY_SEEDS)
+        msg = "分类同步：%d 个节点（%d 次请求，%d 次失败）%s" % (
+            len(nodes), used, errors, ("，清理陈旧 %d 个" % pruned) if pruned else "")
         self.db.add_log(1 if nodes else 0, msg)
-        return {"ok": bool(nodes), "nodes": len(nodes), "requests": used, "message": msg}
+        return {"ok": bool(nodes), "nodes": len(nodes), "requests": used,
+                "pruned": pruned, "message": msg}
 

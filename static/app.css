@@ -200,6 +200,9 @@ a.link:hover{color:var(--fg);text-decoration:underline}
 .tgin:focus{border-color:#bbb}
 .row{display:flex;gap:10px;align-items:center;margin-bottom:14px;flex-wrap:wrap}
 label{font-size:13px;color:var(--muted);min-width:100px}
+label.chk{min-width:0;display:inline-flex;align-items:center;gap:5px;font-size:12.5px;color:#333;
+  border:1px solid var(--line);border-radius:13px;padding:2px 11px;cursor:pointer}
+label.chk input{margin:0}
 .setts input[type=text]{width:320px}
 
 /* ---------- 变价 / 事件 ---------- */

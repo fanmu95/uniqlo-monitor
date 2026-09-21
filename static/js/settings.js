@@ -7,6 +7,14 @@ async function loadSettings(){
     $('s_sweep').value = s.catalog_sweep_min ?? 360;
     $('s_keep').value = s.catalog_keep_days ?? 90;
     $('s_hide').value = s.catalog_hide_days ?? 3;
+    $('s_dropmin').value = s.price_drop_min_pct ?? 0;
+    $('s_eventkeep').value = s.event_keep_days ?? 90;
+    $('s_logkeep').value = s.log_keep_days ?? 30;
+    const kinds = s.notify_kinds || [];
+    $('s_kind_price').checked = kinds.indexOf('PRICE_DOWN') >= 0 || kinds.indexOf('TARGET_HIT') >= 0;
+    $('s_kind_stock').checked = kinds.indexOf('IN') >= 0 || kinds.indexOf('OUT') >= 0 || kinds.indexOf('LOW') >= 0;
+    $('s_kind_transit').checked = kinds.indexOf('TRANSIT') >= 0;
+    $('s_kind_gone').checked = kinds.indexOf('GONE') >= 0;
     $('s_threshold').value = s.low_threshold ?? 2;
     $('s_enabled').value = String(s.notify_enabled ?? 0);
     $('s_channel').value = s.notify_channel || 'pushplus';
@@ -49,6 +57,14 @@ async function saveSettings(){
     catalog_sweep_min: Number($('s_sweep').value)||360,
     catalog_keep_days: Number($('s_keep').value)||90,
     catalog_hide_days: Number($('s_hide').value)||3,
+    price_drop_min_pct: Number($('s_dropmin').value)||0,
+    event_keep_days: Number($('s_eventkeep').value)||90,
+    log_keep_days: Number($('s_logkeep').value)||30,
+    notify_kinds: [].concat(
+      $('s_kind_price').checked ? ['PRICE_DOWN','TARGET_HIT'] : [],
+      $('s_kind_stock').checked ? ['IN','OUT','LOW'] : [],
+      $('s_kind_transit').checked ? ['TRANSIT'] : [],
+      $('s_kind_gone').checked ? ['GONE'] : []),
     low_threshold: Number($('s_threshold').value)||2,
     notify_enabled: Number($('s_enabled').value)||0,
     notify_channel: $('s_channel').value,

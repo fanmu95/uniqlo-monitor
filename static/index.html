@@ -80,6 +80,18 @@
       <input type="text" id="s_keep" placeholder="天"><span style="font-size:12.5px;color:var(--muted)">默认 90 天</span></div>
     <div class="row"><label>下架判定天数</label>
       <input type="text" id="s_hide" placeholder="天"><span style="font-size:12.5px;color:var(--muted)">超过 N 天未在官网分类列表出现 → 商城隐藏 + 暂停采集 + 提醒（重新上架自动恢复）</span></div>
+    <div class="row"><label>降价推送阈值</label>
+      <input type="text" id="s_dropmin" placeholder="%"><span style="font-size:12.5px;color:var(--muted)">降幅小于该百分比只记录不推送；0 = 任何降价都推（达标通知不受影响）</span></div>
+    <div class="row"><label>通知类型</label>
+      <label class="chk"><input type="checkbox" id="s_kind_price"> 降价 / 达标</label>
+      <label class="chk"><input type="checkbox" id="s_kind_stock"> 补货 / 断货 / 低库存</label>
+      <label class="chk"><input type="checkbox" id="s_kind_transit"> 在途</label>
+      <label class="chk"><input type="checkbox" id="s_kind_gone"> 下架</label>
+    </div>
+    <div class="row"><label>事件保留</label>
+      <input type="text" id="s_eventkeep" placeholder="天"><span style="font-size:12.5px;color:var(--muted)">变更日志保留天数（默认 90）</span></div>
+    <div class="row"><label>采集日志保留</label>
+      <input type="text" id="s_logkeep" placeholder="天"><span style="font-size:12.5px;color:var(--muted)">默认 30 天</span></div>
     <div class="row"><label>低库存阈值</label>
       <input type="text" id="s_threshold" placeholder="件"><span style="font-size:12.5px;color:var(--muted)">≤ 该值提醒</span></div>
     <div class="row"><label>开启通知</label>

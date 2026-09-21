@@ -7,6 +7,7 @@ const shop = {
   onlyNew: false,
   onlyDiscount: false,
   onlyStock: false,
+  minDiscount: 0,      // 折扣力度下限（%），0=不限
   onlyDoptimal: false,
   page: 1,
   pageSize: 40,
@@ -127,7 +128,7 @@ function toggleFilter(kind){
     if(shop.onlyNew && shop.sort !== 'new' && shop.sort !== 'newest') shop.sort = 'new';
   }
   if(kind === 'discount') shop.onlyDiscount = !shop.onlyDiscount;
-  if(kind === 'stock') shop.onlyStock = !shop.onlyStock;
+  if(kind === 'stock') shop.onlyStock = !shop.onlyStock;   // 接口保留，界面用折扣档位替代
   if(kind === 'doptimal') shop.onlyDoptimal = !shop.onlyDoptimal;
   loadShop(true);
 }
@@ -141,9 +142,13 @@ function renderToolbar(){
     '<span class="tb-lbl">筛选</span>' +
     sw(shop.onlyNew, 'new', '只看新品') +
     sw(shop.onlyDiscount, 'discount', '只看打折') +
-    sw(shop.onlyStock, 'stock', '只看有货') +
     sw(shop.onlyDoptimal, 'doptimal', '限时特优') +
     (shop.q ? '<span class="count-chip">搜索：' + esc(shop.q) + '</span>' : '') +
+    '<label style="min-width:0;margin-left:4px">折扣 ≥</label>' +
+    '<select id="discSel" onchange="shop.minDiscount=Number(this.value);loadShop(true)">' +
+      [0,20,30,50].map(v=>'<option value="'+v+'"'+(shop.minDiscount===v?' selected':'')+'>'+
+        (v?('≥'+v+'%'):'不限')+'</option>').join('') +
+    '</select>' +
     '<span class="spacer"></span>' +
     '<label style="min-width:0">排序</label>' +
     '<select id="sortSel" onchange="shop.sort=this.value;loadShop(true)">' +
@@ -162,7 +167,8 @@ async function loadShop(reset){
       sort: shop.sort, category: catCode() === 'ALL' ? '' : catCode(), q: shop.q,
       only_new: shop.onlyNew ? 1 : 0, only_discount: shop.onlyDiscount ? 1 : 0,
       only_stock: shop.onlyStock ? 1 : 0,
-      only_doptimal: shop.onlyDoptimal ? 1 : 0});
+      only_doptimal: shop.onlyDoptimal ? 1 : 0,
+      min_discount: shop.minDiscount || 0});
     const d = await api('/api/catalog?' + p.toString());
     shop.total = d.total;
     renderToolbar();
@@ -177,7 +183,7 @@ async function loadShop(reset){
       shop.done = true;
       if(!d.total){
         const hasFilter = shop.q || shop.onlyNew || shop.onlyDiscount || shop.onlyStock ||
-          shop.onlyDoptimal || shop.path.length;
+          shop.onlyDoptimal || shop.minDiscount || shop.path.length;
         $('grid').innerHTML = '<div class="empty">' +
           (hasFilter ? '当前筛选条件下没有商品，试试取消部分筛选。'
                      : '暂无商品。点右上角「更新商品库」开始抓取官方商品（约 1–2 分钟）。') +

@@ -1,6 +1,20 @@
 /* 商品详情抽屉：图集 / 价格历史 / 变价记录 / 色卡尺码 / 订阅 */
 
-const detail = {code:null, data:null, color:null};
+const detail = {code:null, data:null, color:null, chartDays: 0};
+
+function chartRange(days){
+  detail.chartDays = days;
+  document.querySelectorAll('#dbody .sect h3 .fchip[data-days]').forEach(b => {
+    b.classList.toggle('on', b.getAttribute('data-days') === String(days));
+  });
+  renderChartBox();
+}
+function renderChartBox(){
+  const box = $('chartBox'); if(!box || !detail.data) return;
+  const d = detail.data;
+  box.innerHTML = priceChartHtml({points: d.price_series}, 
+    {days: detail.chartDays, promos: d.promo_windows || []});
+}
 
 const BADGE_TEXT = {
   time_doptimal: ['限时特优', 'hot'], concessional_rate: ['超值精选', ''],
@@ -94,9 +108,13 @@ function renderDetail(){
         '" target="_blank" rel="noopener">官网页面 ↗</a>'+
     '</div>'+
     '<div class="sect"><h3>历史价格'+
-      '<span class="hint">共 '+((d.price_series||[]).length)+' 个变化点</span></h3>'+
-      priceChartHtml({points:d.price_series})+
-      priceChangesList(d.price_series)+
+      '<span class="hint">共 '+((d.price_series||[]).length)+' 个变化点</span>'+
+      '<span class="spacer" style="flex:1"></span>'+
+      [0,90,30].map(v=>'<button class="fchip'+(detail.chartDays===v?' on':'')+
+        '" data-days="'+v+'" onclick="chartRange('+v+')">'+(v===0?'全部':(v+'天'))+'</button>').join('')+
+      '</h3>'+
+      '<div id="chartBox"></div>'+
+      priceChangesList(d.price_series, detail.chartDays)+
     '</div>'+
     '<div class="sect"><h3>颜色 / 尺码</h3>'+colorHtml+sizes+
       '<div class="hint">颜色名称与色卡来自官网；尺码为官网在售区间。'+
@@ -105,11 +123,13 @@ function renderDetail(){
     '<div class="sect" id="matrixSect" style="display:none"><h3>尺码库存</h3>'+
       '<div id="matrixBox"></div></div>';
 
+  renderChartBox();
   if(d.has_stock_detail) renderMatrix(p.code);
 }
 
-function priceChangesList(pts){
+function priceChangesList(pts, days){
   if(!pts || pts.length < 2) return '';
+  if(days){ const since = pts[pts.length-1].ts - days*86400; pts = pts.filter(p=>p.ts>=since); }
   const rows = [];
   for(let i=pts.length-1;i>0 && rows.length<8;i--){
     const a = pts[i-1], b = pts[i];
