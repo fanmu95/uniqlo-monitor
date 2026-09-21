@@ -102,10 +102,23 @@ function renderDetail(){
       '<button class="primary" id="subBtn" onclick="toggleSubscribe()"'+
         ((gone && !d.subscribed) ? ' disabled' : '')+'>'+
         (d.subscribed?'取消关注':'关注降价')+'</button>'+
-      '<button onclick="promptTarget()"'+(gone?' disabled':'')+'>设置预期价</button>'+
       '<button onclick="pullSizes()"'+(gone?' disabled':'')+'>拉取尺码库存</button>'+
       '<a class="link" style="align-self:center" href="https://h.uniqlo.cn/product?pid='+esc(p.product_code)+
         '" target="_blank" rel="noopener">官网页面 ↗</a>'+
+    '</div>'+
+    '<div class="dactions" style="margin-top:0">'+
+      '<span style="align-self:center;font-size:12.5px;color:var(--muted)">预期价 ¥</span>'+
+      '<input type="text" class="tgin" id="dTarget" placeholder="未设置" '+
+        'value="'+(p.target_price!=null?p.target_price:'')+'"'+(gone?' disabled':'')+
+        ' onkeydown="if(event.key===\'Enter\')saveDetailTarget()">'+
+      '<button onclick="saveDetailTarget()"'+(gone?' disabled':'')+'>保存</button>'+
+      (p.target_price!=null ? '<button onclick="clearDetailTarget()"'+(gone?' disabled':'')+'>清除</button>' : '')+
+      '<span class="hint" style="align-self:center;margin-top:0">'+
+        (p.target_price!=null
+          ? '现价 ≤ 预期价时推送；价格回升越过预期会自动复位'
+          : '留空保存=清除；未设置时「降价即推送」')+
+        (d.subscribed ? '' : '（未关注：设了也不会推送）')+
+      '</span>'+
     '</div>'+
     '<div class="sect"><h3>历史价格'+
       '<span class="hint">共 '+((d.price_series||[]).length)+' 个变化点</span>'+
@@ -183,16 +196,22 @@ async function toggleSubscribe(){
   btn.disabled = false;
 }
 
-async function promptTarget(){
-  const cur = detail.data.product.target_price;
-  const v = window.prompt('预期价（元）：跌到该价才推送达标通知；留空清除', cur!=null?cur:'');
-  if(v === null) return;
-  const body = {target_price: v.trim()==='' ? null : Number(v)};
-  if(body.target_price !== null && !(body.target_price > 0)) return show('预期价需为正数', true);
+/* 预期价：页内输入（不用 window.prompt —— 系统对话框在预览/iframe 环境不可靠） */
+async function saveDetailTarget(){
+  const el = $('dTarget'); if(!el) return;
+  const v = el.value.trim();
+  if(v && !(Number(v) > 0)) return show('预期价需为正数', true);
   try{
-    await postJson('/api/products/'+detail.code+'/target', body);
-    show(body.target_price ? ('已设置预期价 ¥'+body.target_price) : '已清除预期价');
+    await postJson('/api/products/'+detail.code+'/target',
+                   {target_price: v ? Number(v) : null});
+    show(v ? ('已设置预期价 ¥'+v+'（跌到该价才推送达标通知）')
+           : '已清除预期价，恢复为「降价即推送」');
+    detail.data = await api('/api/catalog/'+detail.code);
+    renderDetail();
   }catch(e){ show('保存失败：'+esc(e.message), true); }
+}
+function clearDetailTarget(){
+  const el = $('dTarget'); if(el){ el.value=''; saveDetailTarget(); }
 }
 
 const pullCd = {};

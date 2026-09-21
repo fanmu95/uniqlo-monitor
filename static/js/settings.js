@@ -78,12 +78,32 @@ async function saveSettings(){
   catch(e){ show('保存失败：'+esc(e.message), true); }
 }
 
+/* 两步确认（不用 window.confirm：预览/iframe 环境里 confirm 会直接返回 false） */
+let sweepArm = 0;
+function _sweepBtns(){
+  return [document.getElementById('sweepBtn'), document.getElementById('btnSweepTop')]
+    .filter(Boolean);
+}
+function _sweepReset(){
+  _sweepBtns().forEach(b => { b.textContent = b.id === 'sweepBtn' ? '立即扫描商品库' : '更新商品库';
+                              b.style.color = ''; });
+}
+
 async function runSweep(){
-  if(!window.confirm('立即扫描官方商品库？\n\n会对官网发起约 100 次低频请求（1 次/秒），'+
-                     '耗时 1–2 分钟，期间可正常使用界面。')) return;
+  const now = Date.now();
+  if(now >= sweepArm){
+    sweepArm = now + 5000;
+    _sweepBtns().forEach(b => { b.textContent = '确认扫描？约 100 次请求';
+                                b.style.color = 'var(--accent)'; });
+    show('再次点击「确认扫描？」立即开始扫描商品库（5 秒内有效，约 1–2 分钟）');
+    setTimeout(() => { if(Date.now() >= sweepArm) _sweepReset(); }, 5100);
+    return;
+  }
+  sweepArm = 0;
   try{
     const r = await postJson('/api/catalog/sweep', {scope:'ALL'});
     show(r.message || (r.ok ? '已开始扫描' : '扫描未能启动'), !r.ok);
+    if(r.ok) _sweepBtns().forEach(b => { b.disabled = true; });
     const t = setInterval(async ()=>{
       const st = await api('/api/catalog/stats').catch(()=>({sweep:{running:false}}));
       loadStats();
