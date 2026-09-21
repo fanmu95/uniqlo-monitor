@@ -1,16 +1,33 @@
+# 优衣库商城 · NAS/服务器部署
+#
+# 更新到最新版：
+#   cd 到本文件所在目录
+#   sudo docker compose pull && sudo docker compose up -d
+#   （下面已设 pull_policy: always，所以直接 up -d 也会拉最新；pull 只是让更新过程显式可见）
+#
+# 访问：http://NAS-IP:9903
 services:
   uniqlo-monitor:
     image: ghcr.io/fanmu95/uniqlo-monitor:latest
     # 想本地构建就取消下一行注释（并把 image 行注释掉）
     # build: .
+    #
+    # 关键：compose 默认 pull_policy=missing —— 本地已存在 latest 标签时**不会**去 registry
+    # 检查更新，于是「明明推了新镜像，NAS 上还是旧版本」。设为 always 保证每次 up 都拉最新。
+    # 若拉取失败（网络/DNS 抖动），旧容器不会被停掉，仍按 restart 策略继续运行。
+    pull_policy: always
     container_name: uniqlo-monitor
     restart: unless-stopped
     ports:
       - "9903:8811"            # 左侧为对外访问端口：http://NAS-IP:9903
+                               # 注意：应用无鉴权，请只在局域网开放
     environment:
       TZ: Asia/Shanghai        # 必须：免打扰时段（23:00-08:00）依赖本地时间，UTC 会偏 8 小时
       UQ_HOST: 0.0.0.0         # 容器内监听全部网卡，否则外部无法访问
       UQ_PORT: "8811"
+      # 可选环境变量：
+      # UQ_NO_STARTUP_SWEEP: "1"   # 关闭启动时的自动建库（默认开启，首次约 1–2 分钟）
+      # UQ_DB: /app/data/monitor.db
     volumes:
       - ./data:/app/data       # 数据持久化：SQLite、价格历史、订阅与通知配置都在这
                                # NAS 实际路径为 /volume1/Docker/uniqlo-monitor/data
