@@ -474,11 +474,14 @@ class DB:
     _JSON_COLS = ("color_pics", "chip_pics", "color_nos", "sizes", "identity", "style_text")
 
     def upsert_catalog_item(self, it: dict, rank_overall: Optional[int] = None,
-                            ts: Optional[int] = None) -> dict:
+                            ts: Optional[int] = None, update_price: bool = True) -> dict:
         """分类扫描入库（catalog 级）。返回 {inserted, price_changed, old_price, new_price}。
 
         只写商品库字段；绝不覆盖 track_level / target_price / target_hit，
         hist_low_price 只降不升，enabled / watches 由用户操作决定。
+
+        update_price=False 用于「旁路榜单」（如新品榜）：已存在的商品一律不改价格字段，
+        避免同一商品码在不同榜单里价格不同（款式聚合/不同颜色组）把史低带偏。
         """
         ts = ts or int(time.time())
         code = (it.get("code") or "").strip()
@@ -511,18 +514,23 @@ class DB:
 
         with self._mutex:
             row = self.conn.execute(
-                "SELECT cur_price, hist_low_price, track_level FROM products WHERE code=?", (code,)
-            ).fetchone()
+                "SELECT cur_price, hist_low_price, origin_price, track_level FROM products WHERE code=?",
+                (code,)).fetchone()
             inserted = row is None
             old_price = row["cur_price"] if row else None
             new_price = vals["cur_price"]
             hist_low = row["hist_low_price"] if row else None
-            # 订阅中（full）商品的现价由详情接口采集维护，扫描不得覆盖，
-            # 否则下一轮 collect_product 会因两个来源的价差产生假的价格事件。
-            full = row is not None and (row["track_level"] or "full") == "full"
-            if full:
+            # 1) 订阅中（full）商品的现价由详情接口采集维护，扫描不得覆盖；
+            # 2) update_price=False 的旁路榜单不改已存在商品的价格。
+            # 否则下一轮 collect_product 会因两个来源的价差产生假的价格事件，
+            # 或把史低带到另一个聚合条目的价格上。
+            keep_price = row is not None and (
+                (row["track_level"] or "full") == "full" or not update_price)
+            if keep_price:
                 vals["cur_price"] = row["cur_price"]
                 vals["hist_low_price"] = row["hist_low_price"]
+                if row["origin_price"] is not None:
+                    vals["origin_price"] = row["origin_price"]
                 price_changed = False
             else:
                 if hist_low is None or (new_price is not None and new_price < hist_low):
@@ -565,6 +573,24 @@ class DB:
             self.conn.commit()
         return {"inserted": inserted, "price_changed": price_changed,
                 "old_price": old_price, "new_price": new_price}
+
+    def align_hist_low(self) -> int:
+        """自愈：把「史低」对齐到价格历史的最低点，返回修正行数。
+
+        不变式 = 史低必须等于我们记录到的最低价（price_snapshots 的最小值）。
+        任何旁路写入（榜单价格差异、同秒覆盖等）造成的不一致，扫描后自动纠回。
+        """
+        with self._mutex:
+            cur = self.conn.execute(
+                """UPDATE products SET hist_low_price = (
+                       SELECT MIN(price) FROM price_snapshots s WHERE s.code = products.code)
+                   WHERE hist_low_price IS NOT NULL
+                     AND EXISTS (SELECT 1 FROM price_snapshots s WHERE s.code = products.code)
+                     AND hist_low_price <> (
+                       SELECT MIN(price) FROM price_snapshots s WHERE s.code = products.code)""")
+            n = cur.rowcount or 0
+            self.conn.commit()
+        return n
 
     def set_rank_new(self, code: str, rank_new: int):
         with self._mutex:

@@ -466,8 +466,12 @@ class Collector:
             except Exception as e:                          # noqa: BLE001
                 notified = " | 通知失败: %s" % e
 
-        msg = "商品库扫描(%s)：%d 页 / %d 件 / 新增 %d / 变价 %d / 下架 %d%s%s%s" % (
+        # ---- 史低自愈：史低必须等于价格历史的最低点 ----
+        fixed_low = self.db.align_hist_low() if complete else 0
+
+        msg = "商品库扫描(%s)：%d 页 / %d 件 / 新增 %d / 变价 %d / 下架 %d%s%s%s%s" % (
             scope, pages, total, new_items, price_changes, gone_cnt,
+            (" / 史低修正 %d" % fixed_low) if fixed_low else "",
             (" / 重复条目 %d 已跳过" % dups) if dups else "", notified,
             (" | 中断: " + err) if err else "")
         self.db.log_sweep(scope, pages, total, new_items, price_changes, 0 if err else 1, msg)
@@ -519,7 +523,11 @@ class Collector:
                     code = norm.get("code")
                     if not code:
                         continue
-                    self.db.upsert_catalog_item(norm, ts=int(time.time()))
+                    # 旁路榜单：已存在的商品只补排名、不改价格，避免交叉榜单把史低带偏
+                    res = self.db.upsert_catalog_item(norm, ts=int(time.time()),
+                                                      update_price=False)
+                    if res.get("inserted") and norm.get("min_price") is not None:
+                        self.db.add_price_snapshot(code, int(time.time()), norm["min_price"])
                     self.db.set_rank_new(code, rank)
                     rank += 1
                     total += 1
