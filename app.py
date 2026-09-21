@@ -347,15 +347,22 @@ def _hide_days(all_days: bool = False):
 
 @app.get("/api/catalog")
 def api_catalog(q: str = "", category: str = "", sort: str = "overall",
-                page: int = 1, page_size: int = 40, all_days: int = 0):
+                page: int = 1, page_size: int = 40, all_days: int = 0,
+                only_new: int = 0, only_discount: int = 0, only_stock: int = 0,
+                only_doptimal: int = 0):
     """商城商品列表（本地商品库）。sort: overall/newest/new/priceAsc/priceDesc/discount
 
     默认隐藏已下架商品（gone_ts 有值 / 超过 catalog_hide_days 天未在官网出现）。
+    筛选条件（可叠加，本地计算）：only_new 官方新品榜 / only_discount 有折扣 / only_stock 官网标记在售。
     """
     r = db.list_catalog(category=category or None, q=q.strip() or None, sort=sort,
-                        page=page, page_size=page_size, hide_days=_hide_days(bool(all_days)))
+                        page=page, page_size=page_size, hide_days=_hide_days(bool(all_days)),
+                        only_new=bool(only_new), only_discount=bool(only_discount),
+                        only_stock=bool(only_stock), only_doptimal=bool(only_doptimal))
     r["category"] = category or "ALL"
     r["sort"] = sort
+    r["filters"] = {"new": bool(only_new), "discount": bool(only_discount),
+                    "stock": bool(only_stock), "doptimal": bool(only_doptimal)}
     return r
 
 

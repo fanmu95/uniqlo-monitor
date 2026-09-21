@@ -12,11 +12,11 @@ async function loadChanges(){
     const bar = $('changesBar');
     if(bar) bar.innerHTML =
       '<span>时间范围</span>' +
-      [1,3,7,30].map(n=>'<button class="chipbtn'+(changes.days===n?' on':'')+
+      [1,3,7,30].map(n=>'<button class="fchip'+(changes.days===n?' on':'')+
         '" onclick="setChangesDays('+n+')">'+n+' 天</button>').join('') +
       '<span class="spacer"></span>' +
       [['','全部'],['down','只看降价'],['up','只看涨价']].map(x=>
-        '<button class="chipbtn'+(changes.direction===x[0]?' on':'')+
+        '<button class="fchip'+(changes.direction===x[0]?' on':'')+
         '" onclick="setChangesDir(\''+x[0]+'\')">'+x[1]+'</button>').join('') +
       '<span class="count-chip">'+d.total+' 条</span>';
     if(!d.items.length){

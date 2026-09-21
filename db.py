@@ -661,8 +661,17 @@ class DB:
 
     def list_catalog(self, category: Optional[str] = None, q: Optional[str] = None,
                      sort: str = "overall", page: int = 1, page_size: int = 40,
-                     hide_days: Optional[int] = None, with_current: bool = True) -> dict:
-        """商城商品列表（本地库）。sort: overall/newest/priceAsc/priceDesc/discount/new。"""
+                     hide_days: Optional[int] = None, with_current: bool = True,
+                     only_new: bool = False, only_discount: bool = False,
+                     only_stock: bool = False, only_doptimal: bool = False) -> dict:
+        """商城商品列表（本地库）。sort: overall/newest/priceAsc/priceDesc/discount/new。
+
+        可选筛选（互相可叠加，都是本地条件，不产生上游请求）：
+          only_new      官方「新作商品」榜内（rank_new 非空）
+          only_discount 现价 < 原价（有折扣）
+          only_stock    官网在售标记为 Y（注：官方列表只收可购商品，实测恒为 Y，预留）
+          only_doptimal 官方「限时特优」标识
+        """
         where, params = [], []
         if with_current and hide_days:
             where.append("gone_ts IS NULL AND (last_seen_ts IS NULL OR last_seen_ts >= ?)")
@@ -673,6 +682,14 @@ class DB:
         if category and category != "ALL":
             where.append("code IN (SELECT code FROM catalog_categories WHERE category_code=?)")
             params.append(category)
+        if only_new:
+            where.append("rank_new IS NOT NULL")
+        if only_discount:
+            where.append("origin_price > 0 AND cur_price IS NOT NULL AND cur_price < origin_price")
+        if only_stock:
+            where.append("stock_flag = 'Y'")
+        if only_doptimal:
+            where.append("identity LIKE '%time_doptimal%'")
         order = {
             "overall": "rank_overall IS NULL, rank_overall ASC, code DESC",
             "newest": "upstream_new_ts IS NULL, upstream_new_ts DESC, code DESC",

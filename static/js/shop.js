@@ -5,6 +5,10 @@ const shop = {
   sort: 'overall',
   q: '',
   onlyNew: false,
+  onlyDiscount: false,
+  onlyStock: false,
+  onlyDoptimal: false,
+  expand: {},          // 超长分类行的展开状态：{父分类code: true}
   page: 1,
   pageSize: 40,
   total: 0,
@@ -19,6 +23,7 @@ const SORTS = [
   ['overall', '官方推荐'], ['newest', '最新上架'], ['new', '新品优先'],
   ['priceAsc', '价格从低到高'], ['priceDesc', '价格从高到低'], ['discount', '折扣力度'],
 ];
+const CHIP_MAX = 14;   // 单行最多展示的 chip 数，超出折叠为「更多 N」
 
 /* ---------- 分类导航 ---------- */
 async function loadCategories(){
@@ -60,6 +65,25 @@ function goUp(){
 
 const LEVEL_LABEL = ['系列', '品类', '细分'];
 
+function _chips(nodes, level, parentCode){
+  const shown = shop.expand[parentCode] ? nodes : nodes.slice(0, CHIP_MAX);
+  let h = shown.map(k => '<button class="fchip' + (k.sel ? ' on' : '') +
+      (_cnt(k.code) ? '' : ' empty') + '" onclick="pickCat(\'' + k.code + '\',' + level +
+      ')" title="' + esc(k.name) + '">' + esc(k.name) +
+      '<span class="n">' + _cnt(k.code) + '</span></button>').join('');
+  const rest = nodes.length - shown.length;
+  if(rest > 0){
+    h += '<button class="fchip more" onclick="expandRow(\'' + parentCode + '\')">更多 ' + rest +
+         ' ▾</button>';
+  }else if(shop.expand[parentCode] && nodes.length > CHIP_MAX){
+    h += '<button class="fchip more" onclick="collapseRow(\'' + parentCode + '\')">收起 ▴</button>';
+  }
+  return h;
+}
+
+function expandRow(code){ shop.expand[code] = true; renderCatbar(); }
+function collapseRow(code){ delete shop.expand[code]; renderCatbar(); }
+
 function renderCatbar(){
   const bar = $('catbar');
   const roots = shop.cats.filter(c => !c.parent_code && c.code !== 'ALL');
@@ -67,70 +91,77 @@ function renderCatbar(){
     bar.innerHTML = '<div class="note">分类树尚未抓取（首次扫描时自动同步官方分类）。可先点右上角「更新商品库」。</div>';
     return;
   }
-  // 面包屑：可点任意一段回退到该层
-  let h = '<div class="crumb">' +
+  let h = '<div class="catpanel">';
+
+  // 面包屑
+  h += '<div class="crumb">' +
     '<span class="cpart' + (shop.path.length ? '' : ' on') + '" onclick="pickRoot(\'ALL\')">全部商品</span>' +
     shop.path.map((n, i) =>
       '<span class="sep">›</span><span class="cpart' + (i === shop.path.length - 1 ? ' on' : '') +
-      '" onclick="pickCat(\'' + n.code + '\',' + i + ')">' + esc(n.name) +
-      '<span class="n">' + _cnt(n.code) + '</span></span>').join('') +
-    (shop.path.length ? '<button class="link" onclick="goUp()">↑ 上级</button>' : '') +
+      '" onclick="pickCat(\'' + n.code + '\',' + i + ')">' + esc(n.name) + '</span>').join('') +
     '<span class="spacer"></span>' +
-    '<span class="count-chip">' + shop.total + ' 件</span>' +
+    '<span class="cnum">' + shop.total + ' 件</span>' +
+    (shop.path.length ? '<button class="crumb-back" onclick="goUp()" title="返回上一级">↑ 上级</button>' : '') +
   '</div>';
 
-  // L1 行
-  h += '<div class="catline"><span class="lbl">分类</span>' +
-    '<button class="chipbtn' + (shop.path.length === 0 ? ' on' : '') +
-      '" onclick="pickRoot(\'ALL\')">全部<span class="n">' + _cnt('ALL') + '</span></button>' +
-    roots.map(c => '<button class="chipbtn' + (shop.path[0] && shop.path[0].code === c.code ? ' on' : '') +
-      '" onclick="pickRoot(\'' + c.code + '\')">' + esc(c.name) +
-      '<span class="n">' + _cnt(c.code) + '</span></button>').join('') +
-  '</div>';
+  // 一级
+  const l1 = [{code: 'ALL', name: '全部', sel: shop.path.length === 0}].concat(
+    roots.map(c => ({code: c.code, name: c.name, sel: !!(shop.path[0] && shop.path[0].code === c.code)})));
+  h += '<div class="catrow"><span class="lvl">一级</span><div class="chips">' +
+       _chips(l1, 0, 'ROOT') + '</div></div>';
 
-  // L2/L3/L4：逐级出现，当前层级有子类才渲染下一行
+  // 二/三/四级：当前层级有子类才出现
+  h += '<div class="catrows">';
   for(let lvl = 0; lvl < 3; lvl++){
     const parent = shop.path[lvl];
     if(!parent) break;
     const kids = _children(parent.code);
     if(!kids.length) break;
     const sel = shop.path[lvl + 1];
-    h += '<div class="catsub"><span class="lbl">' + LEVEL_LABEL[lvl] + '</span>' +
-      kids.map(k => '<button class="chipbtn' + (sel && sel.code === k.code ? ' on' : '') +
-        '" onclick="pickCat(\'' + k.code + '\',' + (lvl + 1) + ')">' + esc(k.name) +
-        '<span class="n">' + _cnt(k.code) + '</span></button>').join('') +
-    '</div>';
+    const nodes = kids.map(k => ({code: k.code, name: k.name, sel: !!(sel && sel.code === k.code)}));
+    h += '<div class="catrow"><span class="lvl">' + LEVEL_LABEL[lvl] + '</span><div class="chips">' +
+         _chips(nodes, lvl + 1, parent.code) + '</div></div>';
   }
+  h += '</div></div>';
   bar.innerHTML = h;
-  // 让当前选中的 chip 在横向滚动行内可见（只动 scrollLeft，避免整页被滚动）
-  const on = bar.querySelector('.chipbtn.on');
-  const row = on && on.closest('.catsub');
-  if(on && row){
+  // 让当前选中的 chip 在行内可见（只动该行横向滚动，不滚动整页）
+  const on = bar.querySelector('.fchip.on');
+  const row = on && on.closest('.chips');
+  if(on && row && row.scrollWidth > row.clientWidth){
     const r = on.getBoundingClientRect(), rr = row.getBoundingClientRect();
-    if(r.left < rr.left || r.right > rr.right){
-      row.scrollLeft += (r.left - rr.left) - 8;
-    }
+    if(r.left < rr.left || r.right > rr.right) row.scrollLeft += (r.left - rr.left) - 8;
   }
 }
 
-/* ---------- 工具条 ---------- */
+/* ---------- 工具条：筛选开关 + 排序 ---------- */
+function toggleFilter(kind){
+  if(kind === 'new'){
+    shop.onlyNew = !shop.onlyNew;
+    if(shop.onlyNew && shop.sort !== 'new' && shop.sort !== 'newest') shop.sort = 'new';
+  }
+  if(kind === 'discount') shop.onlyDiscount = !shop.onlyDiscount;
+  if(kind === 'stock') shop.onlyStock = !shop.onlyStock;
+  if(kind === 'doptimal') shop.onlyDoptimal = !shop.onlyDoptimal;
+  loadShop(true);
+}
+
 function renderToolbar(){
   const tb = $('toolbar');
+  const sw = (on, kind, label) =>
+    '<button class="switch' + (on ? ' on' : '') + '" onclick="toggleFilter(\'' + kind + '\')">' +
+    label + '</button>';
   tb.innerHTML =
-    '<span>' + esc(catName()) + '</span>' +
+    '<span class="tb-lbl">筛选</span>' +
+    sw(shop.onlyNew, 'new', '只看新品') +
+    sw(shop.onlyDiscount, 'discount', '只看打折') +
+    sw(shop.onlyStock, 'stock', '只看有货') +
+    sw(shop.onlyDoptimal, 'doptimal', '限时特优') +
+    (shop.q ? '<span class="count-chip">搜索：' + esc(shop.q) + '</span>' : '') +
     '<span class="spacer"></span>' +
     '<label style="min-width:0">排序</label>' +
     '<select id="sortSel" onchange="shop.sort=this.value;loadShop(true)">' +
       SORTS.map(s=>'<option value="'+s[0]+'"'+(shop.sort===s[0]?' selected':'')+'>'+s[1]+'</option>').join('') +
-    '</select>' +
-    '<button class="chipbtn'+(shop.onlyNew?' on':'')+'" onclick="toggleOnlyNew()">只看新品</button>' +
-    (shop.q ? '<span class="count-chip">搜索：'+esc(shop.q)+'</span>' : '');
-}
-
-function toggleOnlyNew(){
-  shop.onlyNew = !shop.onlyNew;
-  if(shop.onlyNew && shop.sort !== 'new' && shop.sort !== 'newest'){ shop.sort = 'new'; }
-  loadShop(true);
+    '</select>';
 }
 
 /* ---------- 入口 ---------- */
@@ -139,19 +170,17 @@ async function loadShop(reset){
     $('grid').innerHTML = skeleton(8); }
   if(shop.loading || shop.done) return;
   shop.loading = true;
-  if(shop.onlyNew){
-    await loadNewGrid();
-    shop.loading = false;
-    return;
-  }
   try{
     const p = new URLSearchParams({page: shop.page, page_size: shop.pageSize,
-      sort: shop.sort, category: catCode() === 'ALL' ? '' : catCode(), q: shop.q});
+      sort: shop.sort, category: catCode() === 'ALL' ? '' : catCode(), q: shop.q,
+      only_new: shop.onlyNew ? 1 : 0, only_discount: shop.onlyDiscount ? 1 : 0,
+      only_stock: shop.onlyStock ? 1 : 0,
+      only_doptimal: shop.onlyDoptimal ? 1 : 0});
     const d = await api('/api/catalog?' + p.toString());
     shop.total = d.total;
     renderToolbar();
     // 面包屑里的件数随结果更新（分类刚切换时先渲染的画面是上一档的数字）
-    const chip = document.querySelector('#catbar .crumb .count-chip');
+    const chip = document.querySelector('#catbar .crumb .cnum');
     if(chip) chip.textContent = d.total + ' 件';
     const html = (d.items||[]).map(tileHtml).join('');
     if(shop.page === 1) $('grid').innerHTML = html;
@@ -159,26 +188,20 @@ async function loadShop(reset){
     shop.page += 1;
     if(!d.items || !d.items.length || (shop.page-1)*shop.pageSize >= d.total){
       shop.done = true;
-      if(!d.total) $('grid').innerHTML =
-        '<div class="empty">暂无商品。点右上角「更新商品库」开始抓取官方商品（约 1–2 分钟）。</div>';
+      if(!d.total){
+        const hasFilter = shop.q || shop.onlyNew || shop.onlyDiscount || shop.onlyStock ||
+          shop.onlyDoptimal || shop.path.length;
+        $('grid').innerHTML = '<div class="empty">' +
+          (hasFilter ? '当前筛选条件下没有商品，试试取消部分筛选。'
+                     : '暂无商品。点右上角「更新商品库」开始抓取官方商品（约 1–2 分钟）。') +
+          '</div>';
+      }
     }
   }catch(e){
     $('grid').innerHTML = '<div class="empty">加载失败：'+esc(e.message)+'</div>';
   }
   shop.loading = false;
   bindScroll();
-}
-
-async function loadNewGrid(){
-  try{
-    const d = await api('/api/new-arrivals?days=60&limit=120');
-    shop.total = (d.items||[]).length;
-    renderToolbar();
-    $('grid').innerHTML = shop.total
-      ? d.items.map(tileHtml).join('')
-      : '<div class="empty">还没有新品数据。点「更新商品库」抓取官方「新作商品」榜。</div>';
-    shop.done = true;
-  }catch(e){ $('grid').innerHTML = '<div class="empty">加载失败：'+esc(e.message)+'</div>'; }
 }
 
 /* 无限滚动 */
