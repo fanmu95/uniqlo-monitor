@@ -8,7 +8,6 @@ const shop = {
   onlyDiscount: false,
   onlyStock: false,
   onlyDoptimal: false,
-  expand: {},          // 超长分类行的展开状态：{父分类code: true}
   page: 1,
   pageSize: 40,
   total: 0,
@@ -23,7 +22,6 @@ const SORTS = [
   ['overall', '官方推荐'], ['newest', '最新上架'], ['new', '新品优先'],
   ['priceAsc', '价格从低到高'], ['priceDesc', '价格从高到低'], ['discount', '折扣力度'],
 ];
-const CHIP_MAX = 14;   // 单行最多展示的 chip 数，超出折叠为「更多 N」
 
 /* ---------- 分类导航 ---------- */
 async function loadCategories(){
@@ -65,24 +63,13 @@ function goUp(){
 
 const LEVEL_LABEL = ['系列', '品类', '细分'];
 
-function _chips(nodes, level, parentCode){
-  const shown = shop.expand[parentCode] ? nodes : nodes.slice(0, CHIP_MAX);
-  let h = shown.map(k => '<button class="fchip' + (k.sel ? ' on' : '') +
-      (_cnt(k.code) ? '' : ' empty') + '" onclick="pickCat(\'' + k.code + '\',' + level +
-      ')" title="' + esc(k.name) + '">' + esc(k.name) +
-      '<span class="n">' + _cnt(k.code) + '</span></button>').join('');
-  const rest = nodes.length - shown.length;
-  if(rest > 0){
-    h += '<button class="fchip more" onclick="expandRow(\'' + parentCode + '\')">更多 ' + rest +
-         ' ▾</button>';
-  }else if(shop.expand[parentCode] && nodes.length > CHIP_MAX){
-    h += '<button class="fchip more" onclick="collapseRow(\'' + parentCode + '\')">收起 ▴</button>';
-  }
-  return h;
+/* 分类 chip：全部平铺（换行即多行，不做折叠） */
+function _chips(nodes, level){
+  return nodes.map(k => '<button class="fchip' + (k.sel ? ' on' : '') +
+    (_cnt(k.code) ? '' : ' empty') + '" onclick="pickCat(\'' + k.code + '\',' + level +
+    ')" title="' + esc(k.name) + '">' + esc(k.name) +
+    '<span class="n">' + _cnt(k.code) + '</span></button>').join('');
 }
-
-function expandRow(code){ shop.expand[code] = true; renderCatbar(); }
-function collapseRow(code){ delete shop.expand[code]; renderCatbar(); }
 
 function renderCatbar(){
   const bar = $('catbar');
@@ -108,7 +95,7 @@ function renderCatbar(){
   const l1 = [{code: 'ALL', name: '全部', sel: shop.path.length === 0}].concat(
     roots.map(c => ({code: c.code, name: c.name, sel: !!(shop.path[0] && shop.path[0].code === c.code)})));
   h += '<div class="catrow"><span class="lvl">一级</span><div class="chips">' +
-       _chips(l1, 0, 'ROOT') + '</div></div>';
+       _chips(l1, 0) + '</div></div>';
 
   // 二/三/四级：当前层级有子类才出现
   h += '<div class="catrows">';
@@ -120,7 +107,7 @@ function renderCatbar(){
     const sel = shop.path[lvl + 1];
     const nodes = kids.map(k => ({code: k.code, name: k.name, sel: !!(sel && sel.code === k.code)}));
     h += '<div class="catrow"><span class="lvl">' + LEVEL_LABEL[lvl] + '</span><div class="chips">' +
-         _chips(nodes, lvl + 1, parent.code) + '</div></div>';
+         _chips(nodes, lvl + 1) + '</div></div>';
   }
   h += '</div></div>';
   bar.innerHTML = h;

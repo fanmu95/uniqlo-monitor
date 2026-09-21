@@ -73,8 +73,6 @@ button[disabled]{opacity:.5;cursor:not-allowed}
 .fchip.empty{opacity:.45}
 .fchip .n{font-size:11px;opacity:.55;margin-left:5px;font-variant-numeric:tabular-nums}
 .fchip.on .n{opacity:.75}
-.fchip.more{background:none;border-color:var(--line);color:var(--muted)}
-.fchip.more:hover{border-color:#ccc;color:var(--fg)}
 
 /* 工具条（筛选开关 + 排序） */
 .toolbar{display:flex;align-items:center;gap:8px;margin:0 0 14px;flex-wrap:wrap;
