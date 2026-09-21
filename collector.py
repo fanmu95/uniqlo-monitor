@@ -6,9 +6,12 @@ from typing import Dict, List, Optional
 
 from db import DB
 from notifier import send
-from uq_client import UQClient, UQError
+from uq_client import PAGE_SIZE_MAX, UQClient, UQError, normalize_item
 
 IMG_BASE = "https://www.uniqlo.cn"
+
+# 官方顶层分类种子（实测存在；其余顶层码从商品 cateSequence 里补）
+CATEGORY_SEEDS = ["1111MEN", "1111WOMEN", "1111KIDS", "1111BABY", "UNIQLOTOP", "ALL"]
 
 
 class Collector:
@@ -171,11 +174,17 @@ class Collector:
         mine = [w for w in watches if w["product_code"] == ev["product_code"]]
         if not mine:
             return False                          # 无订阅：库存类仅记录不推送
+        # 商城「关注降价」写入的是 (颜色='', 尺码='') 的通配订阅 —— 它只订阅价格，
+        # 不订阅库存，否则一个商品上百个 SKU 的补货/断货会淹没通知。
+        if not any((w.get("size") or w.get("color")) for w in mine):
+            return False
         sku = self._find_sku(ev["sku_id"])
         if not sku:
             return False
         disp = self._display_color(ev["product_code"], sku)
         for w in mine:
+            if not (w.get("size") or w.get("color")):
+                continue
             if w["size"] and sku.get("size") and w["size"] != sku["size"]:
                 continue
             if w["color"] and disp and w["color"] != disp:
@@ -334,7 +343,8 @@ class Collector:
 
     # ---------- 全部 ----------
     def collect_all(self) -> dict:
-        products = [p for p in self.db.list_products() if p.get("enabled")]
+        """全量监控商品（订阅/手动添加，track_level='full'）的库存+价格采集。"""
+        products = [p for p in self.db.list_products(track_level="full") if p.get("enabled")]
         ok = fail = 0
         total_events = 0
         msgs = []
@@ -350,3 +360,174 @@ class Collector:
         self.db.add_log(1 if fail == 0 else 0, summary)
         return {"ok": fail == 0, "summary": summary, "ok_count": ok,
                 "fail_count": fail, "events": total_events, "details": msgs}
+
+    # ================= 商品库扫描（商城）=================
+
+    def sweep_catalog(self, scope: str = "ALL", max_pages: int = 200) -> dict:
+        """按官方分类翻页扫描商品库（默认 ALL）：入库价格/图片/分类 + 变价检测。
+
+        价格事件只对 track_level='full'（订阅中）商品产出，通知在扫描结束后合并发送一次；
+        其余商品的变价只落 price_snapshots，由「变价信息」页派生展示。
+        """
+        cfg = self.db.all_settings()
+        ts = int(time.time())
+        rank = 0
+        page = 1
+        pages = 0
+        total = 0
+        new_items = 0
+        price_changes = 0
+        seen: List[str] = []
+        seen_set = set()
+        dups = 0
+        pending: List[dict] = []
+        watches = self.db.list_watches()
+        err = ""
+        try:
+            while page <= max_pages:
+                r = self.client.browse(category_code=scope, page=page,
+                                       page_size=PAGE_SIZE_MAX, rank="overall")
+                items = r.get("items") or []
+                if not items:
+                    break
+                for it in items:
+                    norm = normalize_item(it)
+                    code = norm.get("code")
+                    if not code:
+                        continue
+                    if code in seen_set:
+                        # 实测：官方 ALL 列表里同一商品码会重复出现（不同聚合/价格），
+                        # 以首次出现（官方排序靠前）为准，避免同轮写入互相覆盖。
+                        dups += 1
+                        continue
+                    seen_set.add(code)
+                    prev = self.db.get_product(code)          # 更新前，供价格事件比对
+                    res = self.db.upsert_catalog_item(norm, rank_overall=rank, ts=ts)
+                    rank += 1
+                    total += 1
+                    seen.append(code)
+                    cate_codes = [c.get("cateCode") for c in (norm.get("cate_sequence") or [])]
+                    if cate_codes:
+                        self.db.set_item_categories(code, cate_codes)
+                    if res.get("inserted"):
+                        new_items += 1
+                        if norm.get("min_price") is not None:
+                            self.db.add_price_snapshot(code, ts, norm["min_price"])
+                    elif res.get("price_changed"):
+                        price_changes += 1
+                        self.db.add_price_snapshot(code, ts, res["new_price"])
+                        if prev and prev.get("track_level") == "full":
+                            events, state = self._price_events(prev, res["new_price"], ts)
+                            for ev in events:
+                                self.db.add_event(ev)
+                            if state.get("target_hit") != prev.get("target_hit"):
+                                self.db.set_target_hit(code, state["target_hit"])
+                            pending += [e for e in events if self._should_notify(e, watches)]
+                pages += 1
+                if pages * PAGE_SIZE_MAX >= (r.get("product_sum") or 0):
+                    break
+                page += 1
+        except UQError as e:
+            err = str(e)
+
+        notified = ""
+        if pending:
+            try:
+                ch = cfg.get("notify_channel", "ntfy")
+                title = "优衣库商品库 · %d 条价格变动" % len(pending)
+                if ch == "pushplus":
+                    body = self._rich_html(pending[0], pending, None)
+                else:
+                    from notifier import batch_summary
+                    body = batch_summary(pending)
+                notified = " | 通知: %s" % send(cfg, title, body)
+            except Exception as e:                          # noqa: BLE001
+                notified = " | 通知失败: %s" % e
+
+        msg = "商品库扫描(%s)：%d 页 / %d 件 / 新增 %d / 变价 %d%s%s%s" % (
+            scope, pages, total, new_items, price_changes,
+            (" / 重复条目 %d 已跳过" % dups) if dups else "", notified,
+            (" | 中断: " + err) if err else "")
+        self.db.log_sweep(scope, pages, total, new_items, price_changes, 0 if err else 1, msg)
+        self.db.add_log(0 if err else 1, msg)
+        return {"ok": not err, "scope": scope, "pages": pages, "items": total,
+                "new_items": new_items, "price_changes": price_changes,
+                "message": msg, "error": err}
+
+    def sweep_new_arrivals(self, max_pages: int = 12) -> dict:
+        """官方「新作商品」榜单（identity=new_product + rank=newest）-> rank_new 排序位次。"""
+        rank = 0
+        page = 1
+        total = 0
+        try:
+            while page <= max_pages:
+                r = self.client.browse(rank="newest", identity=["new_product"],
+                                       page=page, page_size=PAGE_SIZE_MAX)
+                items = r.get("items") or []
+                if not items:
+                    break
+                for it in items:
+                    norm = normalize_item(it)
+                    code = norm.get("code")
+                    if not code:
+                        continue
+                    self.db.upsert_catalog_item(norm, ts=int(time.time()))
+                    self.db.set_rank_new(code, rank)
+                    rank += 1
+                    total += 1
+                if total >= (r.get("product_sum") or 0):
+                    break
+                page += 1
+        except UQError as e:
+            self.db.add_log(0, "新品榜扫描失败: %s" % e)
+            return {"ok": False, "items": total, "message": str(e)}
+        msg = "新品榜扫描：%d 件" % total
+        self.db.add_log(1, msg)
+        return {"ok": True, "items": total, "message": msg}
+
+    def sync_categories(self, budget: int = 80) -> dict:
+        """抓官方分类树（withSideBar 的「品类」facet）-> categories 表。
+
+        一次请求某顶层分类即返回其整棵子树（含中文名/层级），故请求量≈顶层分类数。
+        """
+        seeds = list(dict.fromkeys(CATEGORY_SEEDS + self.db.top_level_codes()))
+        nodes: Dict[str, dict] = {}
+        used = 0
+        errors = 0
+        for code in seeds:
+            if used >= budget:
+                break
+            try:
+                tree = self.client.category_tree(code)
+                used += 1
+            except UQError:
+                errors += 1
+                continue
+            for n in tree:
+                cur = nodes.get(n["code"])
+                if cur is None or n["level"] < cur["level"]:
+                    nodes[n["code"]] = n
+        if nodes:
+            self.db.upsert_categories(list(nodes.values()))
+        # 二次展开：level<=2 且没有子节点的（可能是没被父树覆盖的顶层）
+        have_children = {n["parent"] for n in nodes.values() if n.get("parent")}
+        todo = [c for c, n in nodes.items()
+                if n["level"] <= 2 and c not in have_children and c not in seeds]
+        for code in todo:
+            if used >= budget:
+                break
+            try:
+                tree = self.client.category_tree(code)
+                used += 1
+            except UQError:
+                errors += 1
+                continue
+            for n in tree:
+                cur = nodes.get(n["code"])
+                if cur is None or n["level"] < cur["level"]:
+                    nodes[n["code"]] = n
+            self.db.upsert_categories(list(nodes.values()))
+        msg = "分类同步：%d 个节点（%d 次请求，%d 次失败）" % (len(nodes), used, errors)
+        self.db.add_log(1 if nodes else 0, msg)
+        return {"ok": bool(nodes), "nodes": len(nodes), "requests": used, "message": msg}
+
