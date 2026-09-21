@@ -35,12 +35,17 @@ async function openDetail(code){
 
 function renderDetail(){
   const d = detail.data, p = d.product;
+  const gone = !!p.gone_ts;
+  const goneBadge = gone
+    ? '<span class="tag" style="color:#fff;background:#8a8a8a;border-color:#8a8a8a">已下架</span>'
+    : '';
   const disc = (p.origin_price && p.cur_price && p.cur_price < p.origin_price)
     ? Math.round((p.origin_price - p.cur_price)/p.origin_price*100) : 0;
   const badges = (p.identity||[]).map(k=>{
     const b = BADGE_TEXT[k]; if(!b) return '';
     return '<span class="tag '+(b[1]||'')+'">'+esc(b[0])+'</span>';
   }).join('') + (p.rank_new != null ? '<span class="tag new">新品</span>' : '') +
+    goneBadge +
     (d.subscribed ? '<span class="tag sub">已关注</span>' : '');
 
   const colors = (d.colors||[]).filter(c=>c.pic);
@@ -72,14 +77,19 @@ function renderDetail(){
           (p.sales!=null?'销量 '+(p.sales>10000?(p.sales/10000).toFixed(1)+'万':p.sales):'')+
           (p.evaluation_count!=null?' · 评价 '+p.evaluation_count:'')+'</div>'+
         '<div class="dbadges">'+badges+'</div>'+
-        '<div class="dsub">'+(p.last_seen_ts?('官方在售（'+fmtTime(p.last_seen_ts,false)+' 抓取）'):'')+'</div>'+
+        '<div class="dsub" style="'+(gone?'color:var(--accent)':'')+'">'+
+          (gone
+            ? '该商品已被判定下架（最后在售 '+fmtTime(p.last_seen_ts,false)+'），'
+              + '不再自动采集；重新上架后自动恢复'
+            : (p.last_seen_ts?('官方在售（'+fmtTime(p.last_seen_ts,false)+' 抓取）'):''))+'</div>'+
       '</div>'+
     '</div>'+
     '<div class="dactions">'+
-      '<button class="primary" id="subBtn" onclick="toggleSubscribe()">'+
+      '<button class="primary" id="subBtn" onclick="toggleSubscribe()"'+
+        ((gone && !d.subscribed) ? ' disabled' : '')+'>'+
         (d.subscribed?'取消关注':'关注降价')+'</button>'+
-      '<button onclick="promptTarget()">设置预期价</button>'+
-      '<button onclick="pullSizes()">拉取尺码库存</button>'+
+      '<button onclick="promptTarget()"'+(gone?' disabled':'')+'>设置预期价</button>'+
+      '<button onclick="pullSizes()"'+(gone?' disabled':'')+'>拉取尺码库存</button>'+
       '<a class="link" style="align-self:center" href="https://h.uniqlo.cn/product?pid='+esc(p.product_code)+
         '" target="_blank" rel="noopener">官网页面 ↗</a>'+
     '</div>'+

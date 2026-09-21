@@ -338,13 +338,22 @@ def api_categories():
             "roots": by_parent.get("", []), "children": by_parent}
 
 
+def _hide_days(all_days: bool = False):
+    """下架判定/隐藏天数（0 或 all_days=True 时不过滤）。"""
+    if all_days:
+        return None
+    return int(db.get_setting("catalog_hide_days", 3) or 3)
+
+
 @app.get("/api/catalog")
 def api_catalog(q: str = "", category: str = "", sort: str = "overall",
                 page: int = 1, page_size: int = 40, all_days: int = 0):
-    """商城商品列表（本地商品库）。sort: overall/newest/new/priceAsc/priceDesc/discount"""
-    hide_days = None if all_days else int(db.get_setting("catalog_hide_days", 3) or 3)
+    """商城商品列表（本地商品库）。sort: overall/newest/new/priceAsc/priceDesc/discount
+
+    默认隐藏已下架商品（gone_ts 有值 / 超过 catalog_hide_days 天未在官网出现）。
+    """
     r = db.list_catalog(category=category or None, q=q.strip() or None, sort=sort,
-                        page=page, page_size=page_size, hide_days=hide_days)
+                        page=page, page_size=page_size, hide_days=_hide_days(bool(all_days)))
     r["category"] = category or "ALL"
     r["sort"] = sort
     return r
@@ -392,17 +401,27 @@ def api_catalog_sweep(body: CatalogSweepIn):
 
 
 @app.get("/api/price-changes")
-def api_price_changes(days: int = 3, limit: int = 120, direction: str = ""):
-    """变价信息流：窗口内所有商品的价格变动（降价/涨价）。"""
+def api_price_changes(days: int = 3, limit: int = 120, direction: str = "",
+                      all_days: int = 0):
+    """变价信息流：窗口内所有商品的价格变动（降价/涨价），默认不含已下架商品。"""
     since = int(time.time()) - max(1, days) * 86400
-    rows = db.price_changes_since(since, limit=limit, direction=direction or None)
+    rows = db.price_changes_since(since, limit=limit, direction=direction or None,
+                                  hide_days=_hide_days(bool(all_days)))
     return {"since": since, "days": days, "items": rows, "total": len(rows)}
 
 
 @app.get("/api/new-arrivals")
-def api_new_arrivals(days: int = 30, limit: int = 60):
-    """新品区：官方「新作商品」榜（rank_new）+ 本地首次发现兜底。"""
-    return {"items": db.new_arrivals(limit=limit, days=days)}
+def api_new_arrivals(days: int = 30, limit: int = 60, all_days: int = 0):
+    """新品区：官方「新作商品」榜（rank_new）+ 本地首次发现兜底，默认不含已下架商品。"""
+    return {"items": db.new_arrivals(limit=limit, days=days,
+                                     hide_days=_hide_days(bool(all_days)))}
+
+
+def _require_on_sale(p: dict, action: str):
+    if p.get("gone_ts"):
+        raise HTTPException(409, "该商品已被判定下架（最后在售 %s），无法%s"
+                                 % (time.strftime("%Y-%m-%d", time.localtime(
+                                     p.get("last_seen_ts") or p.get("gone_ts"))), action))
 
 
 @app.post("/api/subscribe")
@@ -412,6 +431,7 @@ def api_subscribe(body: SubscribeIn):
     p = db.get_product(code)
     if not p:
         raise HTTPException(404, "商品不存在（请先扫描商品库或添加监控）")
+    _require_on_sale(p, "订阅")
     pc = _canonical_pc(code, p)
     if body.target_price is not None:
         db.set_target_price(code, body.target_price)
@@ -459,6 +479,7 @@ def api_pull_sizes(code: str):
     p = db.get_product(code)
     if not p:
         raise HTTPException(404, "商品不存在")
+    _require_on_sale(p, "拉取尺码库存")
     with _collect_lock:
         now = time.time()
         last = _pull_once.get(code, 0)
@@ -527,7 +548,7 @@ def api_collect_one(code: str):
             raise HTTPException(429, "刷新过于频繁，请 %d 秒后再试"
                                       % (int(COLLECT_COOLDOWN - (now - last)) + 1))
         _last_collect[code] = now
-    return collector.collect_product(code)
+    return collector.collect_product(code, force=True)   # 手动刷新允许强制验证一次
 
 
 # ---------------- 设置 ----------------

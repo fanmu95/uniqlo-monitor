@@ -171,6 +171,8 @@ class DB:
                 ("products", "chip_pics", "TEXT"),
                 ("products", "color_nos", "TEXT"),
                 ("products", "style_text", "TEXT"),
+                # 下架判定（2026-09-21）：唯一「在售/下架」事实，由扫描结果写入
+                ("products", "gone_ts", "INTEGER"),
             ]:
                 cols = {r["name"] for r in self.conn.execute("PRAGMA table_info(%s)" % tbl)}
                 if col not in cols:
@@ -558,7 +560,7 @@ class DB:
                          identity=:identity,style_text=:style_text,sales=:sales,
                          evaluation_count=:evaluation_count,upstream_new_ts=:upstream_new_ts,
                          stock_flag=:stock_flag,rank_overall=:rank_overall,
-                         last_seen_ts=:ts,updated_at=:ts
+                         gone_ts=NULL,last_seen_ts=:ts,updated_at=:ts
                        WHERE code=:code""", vals)
             self.conn.commit()
         return {"inserted": inserted, "price_changed": price_changed,
@@ -570,12 +572,33 @@ class DB:
             self.conn.commit()
 
     def touch_last_seen(self, codes: List[str], ts: int):
+        """批量刷新「本轮扫描见到过」的时间戳。"""
         if not codes:
             return
         with self._mutex:
             self.conn.executemany("UPDATE products SET last_seen_ts=? WHERE code=?",
                                   [(ts, c) for c in codes])
             self.conn.commit()
+
+    def mark_gone(self, hide_days: int = 3) -> List[dict]:
+        """把连续 N 天未在扫描中出现的商品标记为已下架（gone_ts），返回本轮新判定的商品。
+
+        只应在「扫描完整成功」后调用；重新出现在扫描结果里的商品由
+        upsert_catalog_item 自动清空 gone_ts（即自动恢复在售）。
+        """
+        now = int(time.time())
+        cutoff = now - max(1, int(hide_days)) * 86400
+        with self._mutex:
+            rows = [dict(r) for r in self.conn.execute(
+                """SELECT code, product_code, name, track_level, cur_price, last_seen_ts
+                   FROM products
+                   WHERE gone_ts IS NULL
+                     AND COALESCE(last_seen_ts, created_at) < ?""", (cutoff,))]
+            if rows:
+                self.conn.executemany("UPDATE products SET gone_ts=? WHERE code=?",
+                                      [(now, r["code"]) for r in rows])
+                self.conn.commit()
+        return rows
 
     def set_track_level(self, code: str, level: str):
         with self._mutex:
@@ -616,7 +639,7 @@ class DB:
         """商城商品列表（本地库）。sort: overall/newest/priceAsc/priceDesc/discount/new。"""
         where, params = [], []
         if with_current and hide_days:
-            where.append("(last_seen_ts IS NULL OR last_seen_ts >= ?)")
+            where.append("gone_ts IS NULL AND (last_seen_ts IS NULL OR last_seen_ts >= ?)")
             params.append(int(time.time()) - hide_days * 86400)
         if q:
             where.append("(name LIKE ? OR code LIKE ?)")
@@ -664,45 +687,67 @@ class DB:
         return {"items": items, "total": total, "page": page, "page_size": page_size}
 
     def price_changes_since(self, since_ts: int, limit: int = 120,
-                            direction: Optional[str] = None) -> List[dict]:
+                            direction: Optional[str] = None,
+                            hide_days: Optional[int] = None) -> List[dict]:
         """变价信息：price_snapshots 只在价格变化时落点，用窗口函数取每个点的前价。
 
         注意：必须在 SQL 里过滤出「确有变化」的点再 LIMIT —— 扫描入库时每件商品
         都会写基线点，先 LIMIT 再过滤会被基线点挤满，真实变价永远取不到。
+        已下架商品（gone_ts 有值 / 超过 hide_days 未出现）不出现在变价流里。
         """
         dir_sql = ""
         if direction == "down":
             dir_sql = " AND new_price < old_price"
         elif direction == "up":
             dir_sql = " AND new_price > old_price"
+        sale_sql = ""
+        params: List = []
+        if hide_days:
+            sale_sql = (" AND gone_ts IS NULL AND (last_seen_ts IS NULL "
+                        "OR last_seen_ts >= ?)")
+            params.append(int(time.time()) - hide_days * 86400)
         sql = """
           SELECT * FROM (
             SELECT ps.code, ps.ts, ps.price AS new_price,
                    LAG(ps.price) OVER (PARTITION BY ps.code ORDER BY ps.ts) AS old_price,
                    p.name, p.main_pic, p.origin_price, p.cur_price, p.hist_low_price,
-                   p.track_level, p.gender
+                   p.track_level, p.gender, p.gone_ts, p.last_seen_ts
             FROM price_snapshots ps JOIN products p ON p.code = ps.code
             WHERE p.name IS NOT NULL AND p.name <> ''
           )
-          WHERE ts >= ? AND old_price IS NOT NULL AND old_price <> new_price""" + dir_sql + """
+          WHERE ts >= ? AND old_price IS NOT NULL AND old_price <> new_price""" \
+            + dir_sql + """
           ORDER BY ts DESC LIMIT ?"""
         with self._mutex:
-            rows = [dict(r) for r in self.conn.execute(sql, (since_ts, limit))]
+            rows = [dict(r) for r in self.conn.execute(sql, [since_ts, limit])]
+        out = []
         for r in rows:
             r["direction"] = "down" if r["new_price"] < r["old_price"] else "up"
-        return rows
+            if hide_days:
+                cutoff = int(time.time()) - hide_days * 86400
+                if r.get("gone_ts") or (r.get("last_seen_ts") and r["last_seen_ts"] < cutoff):
+                    continue
+            out.append(r)
+        return out
 
-    def new_arrivals(self, limit: int = 60, days: int = 30) -> List[dict]:
+    def new_arrivals(self, limit: int = 60, days: int = 30,
+                     hide_days: Optional[int] = None) -> List[dict]:
         since = int(time.time()) - days * 86400
+        where = ""
+        params: List = [since]
+        if hide_days:
+            where = " AND gone_ts IS NULL AND (last_seen_ts IS NULL OR last_seen_ts >= ?)"
+            params.append(int(time.time()) - hide_days * 86400)
+        params.append(limit)
         with self._mutex:
             rows = [dict(r) for r in self.conn.execute(
                 """SELECT code, product_code, name, origin_price, cur_price, hist_low_price,
                           main_pic, gender, season, stock_flag, rank_new, first_seen_ts,
-                          upstream_new_ts, track_level
+                          upstream_new_ts, track_level, gone_ts
                    FROM products
-                   WHERE rank_new IS NOT NULL OR first_seen_ts >= ?
+                   WHERE (rank_new IS NOT NULL OR first_seen_ts >= ?)""" + where + """
                    ORDER BY rank_new IS NULL, rank_new ASC, first_seen_ts DESC, code DESC
-                   LIMIT ?""", (since, limit))]
+                   LIMIT ?""", params)]
         for r in rows:
             r["is_new"] = True
         return rows

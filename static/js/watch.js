@@ -18,6 +18,15 @@ async function loadMonitor(){
         ? (p.target_hit ? '<span class="badge ok">已达标</span>'
                         : '<span style="font-size:12px;color:var(--muted)">预期 ¥'+p.target_price+'</span>')
         : '';
+      const gone = !!p.gone_ts;
+      const status = gone
+        ? '<span class="status off">已下架</span>'
+        : '<span class="status'+(p.enabled?'':' off')+'">'+(p.enabled?'监控中':'已暂停')+'</span>';
+      const goneNote = gone
+        ? '<div class="meta-row" style="color:var(--muted)">连续多日未在官网出现，已暂停自动采集'+
+          '（最后在售 '+fmtTime(p.last_seen_ts, false)+'）。重新上架后自动恢复；'+
+          '也可点「刷新」强制核对一次。</div>'
+        : '';
       const pic = p.main_pic
         ? imgTag(p.main_pic, null, 'thumb', '', 'onclick="event.stopPropagation();viewImg(this.src)"')
         : '<div class="thumb"></div>';
@@ -28,8 +37,9 @@ async function loadMonitor(){
               '<span class="card-name">'+esc(p.name||p.code)+'</span>'+
               '<span class="card-code">'+p.code+'</span>'+
               '<span class="spacer" style="flex:1"></span>'+
-              '<span class="status'+(p.enabled?'':' off')+'">'+(p.enabled?'监控中':'已暂停')+'</span>'+
+              status+
             '</div>'+
+            goneNote+
             '<div class="price-row">'+
               '<span class="price">¥'+(p.cur_price??'-')+'</span>'+
               (p.origin_price&&p.origin_price!=p.cur_price

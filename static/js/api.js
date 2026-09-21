@@ -77,7 +77,7 @@ function fmtDay(ts){
 }
 function kindText(k){
   return {OUT:'断货',IN:'补货',LOW:'低库存',TRANSIT:'在途',
-          PRICE_DOWN:'降价',PRICE_UP:'涨价',TARGET_HIT:'达标'}[k]||k;
+          PRICE_DOWN:'降价',PRICE_UP:'涨价',TARGET_HIT:'达标',GONE:'下架'}[k]||k;
 }
 
 /* 价格走势 SVG（仅价格变化点） */

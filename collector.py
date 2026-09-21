@@ -248,10 +248,17 @@ class Collector:
         return html
 
     # ---------- 单个商品 ----------
-    def collect_product(self, code: str) -> dict:
+    def collect_product(self, code: str, force: bool = False) -> dict:
         p = self.db.get_product(code)
         if not p:
             return {"ok": False, "message": "商品不存在: %s" % code}
+        if p.get("gone_ts") and not force:
+            # 已判定下架的商品不再每轮无效请求；重新上架由商品库扫描自动恢复
+            return {"ok": False, "message":
+                    "%s 已被判定下架（最后在售 %s），已暂停自动采集；"
+                    "重新上架后自动恢复（可手动强制刷新一次验证）" % (
+                        code, time.strftime("%Y-%m-%d", time.localtime(
+                            p.get("last_seen_ts") or p.get("gone_ts"))))}
         cfg = self.db.all_settings()
         threshold = int(cfg.get("low_threshold") or 2)
 
@@ -343,8 +350,13 @@ class Collector:
 
     # ---------- 全部 ----------
     def collect_all(self) -> dict:
-        """全量监控商品（订阅/手动添加，track_level='full'）的库存+价格采集。"""
-        products = [p for p in self.db.list_products(track_level="full") if p.get("enabled")]
+        """全量监控商品（订阅/手动添加，track_level='full'）的库存+价格采集。
+
+        已判定下架（gone_ts）的商品跳过：详情接口对不存在/下架商品会返回
+        PD_PRODUCT_03，持续请求只会刷失败日志（实测确认）。
+        """
+        products = [p for p in self.db.list_products(track_level="full")
+                    if p.get("enabled") and not p.get("gone_ts")]
         ok = fail = 0
         total_events = 0
         msgs = []
@@ -380,6 +392,7 @@ class Collector:
         seen: List[str] = []
         seen_set = set()
         dups = 0
+        first_sum = 0
         pending: List[dict] = []
         watches = self.db.list_watches()
         err = ""
@@ -390,6 +403,8 @@ class Collector:
                 items = r.get("items") or []
                 if not items:
                     break
+                if page == 1:
+                    first_sum = r.get("product_sum") or 0
                 for it in items:
                     norm = normalize_item(it)
                     code = norm.get("code")
@@ -430,11 +445,18 @@ class Collector:
         except UQError as e:
             err = str(e)
 
+        # ---- 下架判定：只在「完整扫完一轮」时做（半途中断/少页会误杀）----
+        gone_cnt = 0
+        complete = pages > 0 and (total + dups) >= first_sum and not err
+        if complete:
+            gone_cnt, gone_pending = self.handle_gone(int(cfg.get("catalog_hide_days") or 3), ts)
+            pending += gone_pending
+
         notified = ""
         if pending:
             try:
                 ch = cfg.get("notify_channel", "ntfy")
-                title = "优衣库商品库 · %d 条价格变动" % len(pending)
+                title = "优衣库商品库 · %d 条更新" % len(pending)
                 if ch == "pushplus":
                     body = self._rich_html(pending[0], pending, None)
                 else:
@@ -444,15 +466,41 @@ class Collector:
             except Exception as e:                          # noqa: BLE001
                 notified = " | 通知失败: %s" % e
 
-        msg = "商品库扫描(%s)：%d 页 / %d 件 / 新增 %d / 变价 %d%s%s%s" % (
-            scope, pages, total, new_items, price_changes,
+        msg = "商品库扫描(%s)：%d 页 / %d 件 / 新增 %d / 变价 %d / 下架 %d%s%s%s" % (
+            scope, pages, total, new_items, price_changes, gone_cnt,
             (" / 重复条目 %d 已跳过" % dups) if dups else "", notified,
             (" | 中断: " + err) if err else "")
         self.db.log_sweep(scope, pages, total, new_items, price_changes, 0 if err else 1, msg)
         self.db.add_log(0 if err else 1, msg)
         return {"ok": not err, "scope": scope, "pages": pages, "items": total,
                 "new_items": new_items, "price_changes": price_changes,
-                "message": msg, "error": err}
+                "gone": gone_cnt, "message": msg, "error": err}
+
+    def handle_gone(self, hide_days: int, ts: int):
+        """判定下架并为「关注中」的下架商品生成 GONE 事件。
+
+        返回 (下架数量, 待通知条目)；重新上架由扫描时的 upsert 自动清空 gone_ts。
+        """
+        gone_cnt = 0
+        pending: List[dict] = []
+        for g in self.db.mark_gone(hide_days):
+            gone_cnt += 1
+            if g.get("track_level") != "full":
+                continue
+            last = time.strftime("%Y-%m-%d", time.localtime(g.get("last_seen_ts") or ts))
+            self.db.add_event({
+                "product_code": g.get("product_code"), "sku_id": None,
+                "kind": "GONE", "notify": True, "ts": ts,
+                "title": "已下架：%s" % (g.get("name") or g.get("code")),
+                "detail": "连续 %d 天未在官网分类列表中出现（最后在售 %s，现价 ¥%s），"
+                          "已暂停自动采集" % (hide_days, last, g.get("cur_price")),
+                "old_val": None, "new_val": None})
+            pending.append({
+                "product_code": g.get("product_code"), "kind": "GONE",
+                "title": "已下架：%s（%s）" % (g.get("name") or "", g.get("code")),
+                "detail": "连续 %d 天未在官网出现（最后在售 %s），已暂停采集；重新上架自动恢复"
+                          % (hide_days, last), "notify": True})
+        return gone_cnt, pending
 
     def sweep_new_arrivals(self, max_pages: int = 12) -> dict:
         """官方「新作商品」榜单（identity=new_product + rank=newest）-> rank_new 排序位次。"""
