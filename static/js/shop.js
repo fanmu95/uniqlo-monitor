@@ -14,6 +14,9 @@ const shop = {
   total: 0,
   loading: false,
   done: false,
+  cursor: null,         // keyset 游标：扫描期间数据变动也不会重复/漏项
+  seen: new Set(),      // 已渲染商品 code：前端兜底去重
+  retry: 0,             // 连续「整页都是重复项」的次数（防死循环）
   cats: [],            // 分类节点（含 level / parent_code）
   counts: {},
   scrollBound: false,
@@ -158,8 +161,8 @@ function renderToolbar(){
 
 /* ---------- 入口 ---------- */
 async function loadShop(reset){
-  if(reset){ shop.page = 1; shop.done = false; shop.total = 0;
-    $('grid').innerHTML = skeleton(8); }
+  if(reset){ shop.page = 1; shop.done = false; shop.total = 0; shop.retry = 0;
+    shop.cursor = null; shop.seen.clear(); $('grid').innerHTML = skeleton(8); }
   if(shop.loading || shop.done) return;
   shop.loading = true;
   try{
@@ -169,17 +172,30 @@ async function loadShop(reset){
       only_stock: shop.onlyStock ? 1 : 0,
       only_doptimal: shop.onlyDoptimal ? 1 : 0,
       min_discount: shop.minDiscount || 0});
+    if(shop.cursor) p.set('cursor', shop.cursor);
     const d = await api('/api/catalog?' + p.toString());
     shop.total = d.total;
     renderToolbar();
     // 面包屑里的件数随结果更新（分类刚切换时先渲染的画面是上一档的数字）
     const chip = document.querySelector('#catbar .crumb .cnum');
     if(chip) chip.textContent = d.total + ' 件';
-    const html = (d.items||[]).map(tileHtml).join('');
-    if(shop.page === 1) $('grid').innerHTML = html;
-    else $('grid').insertAdjacentHTML('beforeend', html);
+    // 兜底去重：即便后端分页异常或切换竞态，同一 code 也只渲染一次
+    const items = d.items || [];
+    const fresh = items.filter(it => {
+      if(!it || !it.code || shop.seen.has(it.code)) return false;
+      shop.seen.add(it.code);
+      return true;
+    });
+    const html = fresh.map(tileHtml).join('');
+    if(html){
+      if(shop.page === 1) $('grid').innerHTML = html;
+      else $('grid').insertAdjacentHTML('beforeend', html);
+    }
     shop.page += 1;
-    if(!d.items || !d.items.length || (shop.page-1)*shop.pageSize >= d.total){
+    shop.cursor = d.next_cursor || null;
+    const reachedEnd = !items.length || !d.next_cursor ||
+      (!shop.cursor && (shop.page-1)*shop.pageSize >= d.total);
+    if(reachedEnd){
       shop.done = true;
       if(!d.total){
         const hasFilter = shop.q || shop.onlyNew || shop.onlyDiscount || shop.onlyStock ||
@@ -189,6 +205,13 @@ async function loadShop(reset){
                      : '暂无商品。点右上角「更新商品库」开始抓取官方商品（约 1–2 分钟）。') +
           '</div>';
       }
+    }else if(!fresh.length && shop.retry < 3){
+      // 整页都是已渲染过的商品：继续取下一页，避免滚动到底后卡住
+      shop.retry += 1;
+      shop.loading = false;
+      return loadShop(false);
+    }else{
+      shop.retry = 0;
     }
   }catch(e){
     $('grid').innerHTML = '<div class="empty">加载失败：'+esc(e.message)+'</div>';

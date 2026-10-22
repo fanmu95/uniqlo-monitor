@@ -353,18 +353,21 @@ def _hide_days(all_days: bool = False):
 def api_catalog(q: str = "", category: str = "", sort: str = "overall",
                 page: int = 1, page_size: int = 40, all_days: int = 0,
                 only_new: int = 0, only_discount: int = 0, only_stock: int = 0,
-                only_doptimal: int = 0, min_discount: int = 0):
+                only_doptimal: int = 0, min_discount: int = 0, cursor: str = ""):
     """商城商品列表（本地商品库）。sort: overall/newest/new/priceAsc/priceDesc/discount
 
     默认隐藏已下架商品（gone_ts 有值 / 超过 catalog_hide_days 天未在官网出现）。
     筛选条件（可叠加，本地计算）：only_new 官方新品榜 / only_discount 有折扣 /
     only_stock 官网标记在售（预留，实测恒 Y）/ only_doptimal 限时特优 / min_discount 折扣 ≥ N%。
+
+    分页：优先使用 cursor（keyset 游标，扫描期间数据变动也不会重复/漏项）；
+    未传 cursor 时按 page 走 offset 分页（兼容旧调用）。
     """
     r = db.list_catalog(category=category or None, q=q.strip() or None, sort=sort,
                         page=page, page_size=page_size, hide_days=_hide_days(bool(all_days)),
                         only_new=bool(only_new), only_discount=bool(only_discount),
                         only_stock=bool(only_stock), only_doptimal=bool(only_doptimal),
-                        min_discount=int(min_discount or 0))
+                        min_discount=int(min_discount or 0), cursor=cursor or None)
     r["category"] = category or "ALL"
     r["sort"] = sort
     r["filters"] = {"new": bool(only_new), "discount": bool(only_discount),

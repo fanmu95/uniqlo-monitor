@@ -1,9 +1,25 @@
 # -*- coding: utf-8 -*-
 """SQLite 数据层：商品主档 / SKU 字典 / 库存快照 / 变更事件 / 尺码订阅 / 设置"""
+import base64
 import json
 import sqlite3
 import time
 from typing import Any, Dict, List, Optional
+
+
+def _encode_cursor(vals: list) -> str:
+    """把排序键值序列编码为不透明游标（base64url JSON）。"""
+    raw = json.dumps(vals, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
+    return base64.urlsafe_b64encode(raw).decode("ascii")
+
+
+def _decode_cursor(cursor: str) -> Optional[list]:
+    try:
+        raw = base64.urlsafe_b64decode(cursor.encode("ascii"))
+        vals = json.loads(raw.decode("utf-8"))
+        return vals if isinstance(vals, list) else None
+    except Exception:
+        return None
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS products (
@@ -697,7 +713,7 @@ class DB:
                      hide_days: Optional[int] = None, with_current: bool = True,
                      only_new: bool = False, only_discount: bool = False,
                      only_stock: bool = False, only_doptimal: bool = False,
-                     min_discount: int = 0) -> dict:
+                     min_discount: int = 0, cursor: Optional[str] = None) -> dict:
         """商城商品列表（本地库）。sort: overall/newest/priceAsc/priceDesc/discount/new。
 
         可选筛选（互相可叠加，都是本地条件，不产生上游请求）：
@@ -729,23 +745,48 @@ class DB:
             where.append("origin_price > 0 AND cur_price IS NOT NULL "
                          "AND (origin_price-cur_price)*100/origin_price >= ?")
             params.append(int(min_discount))
-        order = {
-            "overall": "rank_overall IS NULL, rank_overall ASC, code DESC",
-            "newest": "upstream_new_ts IS NULL, upstream_new_ts DESC, code DESC",
-            "new": "rank_new IS NULL, rank_new ASC, first_seen_ts DESC",
-            "priceAsc": "cur_price IS NULL, cur_price ASC, code DESC",
-            "priceDesc": "cur_price IS NULL, cur_price DESC, code DESC",
-            "discount": ("CASE WHEN origin_price>0 AND cur_price IS NOT NULL "
-                         "THEN (origin_price-cur_price)/origin_price ELSE -1 END DESC, code DESC"),
-        }.get(sort, "rank_overall IS NULL, rank_overall ASC, code DESC")
-        wsql = (" WHERE " + " AND ".join(where)) if where else ""
+        # 排序定义：归一化为 (SQL 表达式, 方向)。NULL 用哨兵折叠成普通值，
+        # 末尾统一以 code DESC 兜底，保证排序全序（keyset 分页的前提）。
+        keys = {
+            "overall": [("COALESCE(rank_overall, 9223372036854775807)", "ASC"), ("code", "DESC")],
+            "newest": [("COALESCE(upstream_new_ts, -1)", "DESC"), ("code", "DESC")],
+            "new": [("COALESCE(rank_new, 9223372036854775807)", "ASC"),
+                    ("COALESCE(first_seen_ts, -1)", "DESC"), ("code", "DESC")],
+            "priceAsc": [("COALESCE(cur_price, 1e18)", "ASC"), ("code", "DESC")],
+            "priceDesc": [("COALESCE(cur_price, -1)", "DESC"), ("code", "DESC")],
+            "discount": [("CASE WHEN origin_price>0 AND cur_price IS NOT NULL "
+                          "THEN (origin_price-cur_price)/origin_price ELSE -1 END", "DESC"),
+                         ("code", "DESC")],
+        }.get(sort, [("COALESCE(rank_overall, 9223372036854775807)", "ASC"), ("code", "DESC")])
+        order_sql = ", ".join("%s %s" % (expr, direction) for expr, direction in keys)
+        key_select = ", ".join("%s AS __k%d" % (expr, i) for i, (expr, _) in enumerate(keys))
+
         page = max(1, int(page))
         page_size = min(max(1, int(page_size)), 100)
+
+        # 先保存「仅筛选」条件快照：总数不受游标影响
+        filter_where, filter_params = list(where), list(params)
+
+        # keyset（游标）分页：以「上一页末位的排序键值」为起点，
+        # 数据集在扫描期间新增/更新也不会导致重复或漏项（offset 分页做不到这一点）。
+        cursor_vals = _decode_cursor(cursor) if cursor else None
+        use_cursor = bool(cursor_vals) and len(cursor_vals) == len(keys)
+        if use_cursor:
+            terms, tparams = [], []
+            for i, (expr, direction) in enumerate(keys):
+                eqs = ["%s = ?" % keys[j][0] for j in range(i)]
+                cmp_op = ">" if direction == "ASC" else "<"
+                terms.append("(" + " AND ".join(eqs + ["%s %s ?" % (expr, cmp_op)]) + ")")
+                tparams += list(cursor_vals[:i]) + [cursor_vals[i]]
+            where.append("(" + " OR ".join(terms) + ")")
+            params += tparams
+
+        wsql = (" WHERE " + " AND ".join(where)) if where else ""
+        twsql = (" WHERE " + " AND ".join(filter_where)) if filter_where else ""
         with self._mutex:
-            total = self.conn.execute("SELECT COUNT(*) c FROM products" + wsql,
-                                      params).fetchone()["c"]
-            rows = self.conn.execute(
-                """SELECT code, product_code, name, origin_price, cur_price, hist_low_price,
+            total = self.conn.execute("SELECT COUNT(*) c FROM products" + twsql,
+                                      filter_params).fetchone()["c"]
+            base_select = """SELECT code, product_code, name, origin_price, cur_price, hist_low_price,
                           main_pic, gender, season, sizes, min_size, max_size, stock_flag,
                           identity, sales, evaluation_count, limited_end, track_level,
                           rank_new, first_seen_ts, last_seen_ts, target_price,
@@ -753,12 +794,22 @@ class DB:
                                THEN CAST(ROUND((origin_price-cur_price)/origin_price*100) AS INT)
                                END AS discount_pct,
                           EXISTS(SELECT 1 FROM watches w WHERE w.product_code=products.product_code
-                                 AND w.enabled=1) AS subscribed
-                   FROM products""" + wsql + " ORDER BY " + order + " LIMIT ? OFFSET ?",
-                params + [page_size, (page - 1) * page_size]).fetchall()
+                                 AND w.enabled=1) AS subscribed,
+                          """ + key_select + """
+                   FROM products"""
+            if use_cursor:
+                rows = self.conn.execute(
+                    base_select + wsql + " ORDER BY " + order_sql + " LIMIT ?",
+                    params + [page_size]).fetchall()
+            else:
+                rows = self.conn.execute(
+                    base_select + wsql + " ORDER BY " + order_sql + " LIMIT ? OFFSET ?",
+                    params + [page_size, (page - 1) * page_size]).fetchall()
         items = []
         for r in rows:
             d = dict(r)
+            for k in [x for x in list(d) if x.startswith("__k")]:
+                d.pop(k)          # 排序键仅用于生成游标，不返回给前端
             for c in ("sizes", "identity"):
                 try:
                     d[c] = json.loads(d.get(c) or "[]")
@@ -766,7 +817,13 @@ class DB:
                     d[c] = []
             d["is_new"] = d.get("rank_new") is not None
             items.append(d)
-        return {"items": items, "total": total, "page": page, "page_size": page_size}
+
+        next_cursor = None
+        if rows and len(rows) == page_size:
+            last = rows[-1]
+            next_cursor = _encode_cursor([last["__k%d" % i] for i in range(len(keys))])
+        return {"items": items, "total": total, "page": page, "page_size": page_size,
+                "next_cursor": next_cursor}
 
     def price_changes_since(self, since_ts: int, limit: int = 120,
                             direction: Optional[str] = None,
